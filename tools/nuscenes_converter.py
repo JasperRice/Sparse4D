@@ -4,9 +4,9 @@ from collections import OrderedDict
 from os import path as osp
 from typing import List, Tuple, Union
 
+import mmcv
 import numpy as np
 from nuscenes.nuscenes import NuScenes
-import mmcv
 from pyquaternion import Quaternion
 
 NameMapping = {
@@ -64,9 +64,7 @@ def create_nuscenes_infos(
     # filter existing scenes.
     available_scenes = get_available_scenes(nusc)
     available_scene_names = [s["name"] for s in available_scenes]
-    train_scenes = list(
-        filter(lambda x: x in available_scene_names, train_scenes)
-    )
+    train_scenes = list(filter(lambda x: x in available_scene_names, train_scenes))
     val_scenes = list(filter(lambda x: x in available_scene_names, val_scenes))
     train_scenes = set(
         [
@@ -75,10 +73,7 @@ def create_nuscenes_infos(
         ]
     )
     val_scenes = set(
-        [
-            available_scenes[available_scene_names.index(s)]["token"]
-            for s in val_scenes
-        ]
+        [available_scenes[available_scene_names.index(s)]["token"] for s in val_scenes]
     )
 
     test = "test" in version
@@ -86,9 +81,7 @@ def create_nuscenes_infos(
         print("test scene: {}".format(len(train_scenes)))
     else:
         print(
-            "train scene: {}, val scene: {}".format(
-                len(train_scenes), len(val_scenes)
-            )
+            "train scene: {}, val scene: {}".format(len(train_scenes), len(val_scenes))
         )
     train_nusc_infos, val_nusc_infos = _fill_trainval_infos(
         nusc, train_scenes, val_scenes, test, max_sweeps=max_sweeps
@@ -155,9 +148,7 @@ def get_available_scenes(nusc):
     return available_scenes
 
 
-def _fill_trainval_infos(
-    nusc, train_scenes, val_scenes, test=False, max_sweeps=10
-):
+def _fill_trainval_infos(nusc, train_scenes, val_scenes, test=False, max_sweeps=10):
     """Generate the train/val infos from the raw data.
 
     Args:
@@ -178,9 +169,7 @@ def _fill_trainval_infos(
     for sample in mmcv.track_iter_progress(nusc.sample):
         lidar_token = sample["data"]["LIDAR_TOP"]
         sd_rec = nusc.get("sample_data", sample["data"]["LIDAR_TOP"])
-        cs_record = nusc.get(
-            "calibrated_sensor", sd_rec["calibrated_sensor_token"]
-        )
+        cs_record = nusc.get("calibrated_sensor", sd_rec["calibrated_sensor_token"])
         pose_record = nusc.get("ego_pose", sd_rec["ego_pose_token"])
         lidar_path, boxes, _ = nusc.get_sample_data(lidar_token)
 
@@ -245,14 +234,13 @@ def _fill_trainval_infos(
         # obtain annotation
         if not test:
             annotations = [
-                nusc.get("sample_annotation", token)
-                for token in sample["anns"]
+                nusc.get("sample_annotation", token) for token in sample["anns"]
             ]
             locs = np.array([b.center for b in boxes]).reshape(-1, 3)
             dims = np.array([b.wlh for b in boxes]).reshape(-1, 3)
-            rots = np.array(
-                [b.orientation.yaw_pitch_roll[0] for b in boxes]
-            ).reshape(-1, 1)
+            rots = np.array([b.orientation.yaw_pitch_roll[0] for b in boxes]).reshape(
+                -1, 1
+            )
             velocity = np.array(
                 [nusc.box_velocity(token)[:2] for token in sample["anns"]]
             )
@@ -266,11 +254,7 @@ def _fill_trainval_infos(
             # convert velo from global to lidar
             for i in range(len(boxes)):
                 velo = np.array([*velocity[i], 0.0])
-                velo = (
-                    velo
-                    @ np.linalg.inv(e2g_r_mat).T
-                    @ np.linalg.inv(l2e_r_mat).T
-                )
+                velo = velo @ np.linalg.inv(e2g_r_mat).T @ np.linalg.inv(l2e_r_mat).T
                 velocity[i] = velo[:2]
 
             names = [b.name for b in boxes]
@@ -286,20 +270,13 @@ def _fill_trainval_infos(
                 annotations
             ), f"{len(gt_boxes)}, {len(annotations)}"
             info["instance_inds"] = np.array(
-                [
-                    nusc.getind("instance", x["instance_token"])
-                    for x in annotations
-                ]
+                [nusc.getind("instance", x["instance_token"]) for x in annotations]
             )
             info["gt_boxes"] = gt_boxes
             info["gt_names"] = names
             info["gt_velocity"] = velocity.reshape(-1, 2)
-            info["num_lidar_pts"] = np.array(
-                [a["num_lidar_pts"] for a in annotations]
-            )
-            info["num_radar_pts"] = np.array(
-                [a["num_radar_pts"] for a in annotations]
-            )
+            info["num_lidar_pts"] = np.array([a["num_lidar_pts"] for a in annotations])
+            info["num_radar_pts"] = np.array([a["num_radar_pts"] for a in annotations])
             info["valid_flag"] = valid_flag
 
         if sample["scene_token"] in train_scenes:
@@ -331,9 +308,7 @@ def obtain_sensor2top(
         sweep (dict): Sweep information after transformation.
     """
     sd_rec = nusc.get("sample_data", sensor_token)
-    cs_record = nusc.get(
-        "calibrated_sensor", sd_rec["calibrated_sensor_token"]
-    )
+    cs_record = nusc.get("calibrated_sensor", sd_rec["calibrated_sensor_token"])
     pose_record = nusc.get("ego_pose", sd_rec["ego_pose_token"])
     data_path = str(nusc.get_sample_data_path(sd_rec["token"]))
     if os.getcwd() in data_path:  # path from lyftdataset is absolute path

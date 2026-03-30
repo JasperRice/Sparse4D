@@ -1,16 +1,12 @@
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-
-from mmcv.cnn import Linear, Scale, bias_init_with_prob
-from mmcv.runner.base_module import Sequential, BaseModule
-from mmcv.cnn import xavier_init
-from mmcv.cnn.bricks.registry import (
-    PLUGIN_LAYERS,
-    POSITIONAL_ENCODING,
-)
+from mmcv.cnn import Linear, Scale, bias_init_with_prob, xavier_init
+from mmcv.cnn.bricks.registry import PLUGIN_LAYERS, POSITIONAL_ENCODING
+from mmcv.runner.base_module import BaseModule, Sequential
 
 from projects.mmdet3d_plugin.core.box3d import *
+
 from ..blocks import linear_relu_ln
 
 __all__ = [
@@ -169,9 +165,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         self.num_learnable_pts = num_learnable_pts
         if fix_scale is None:
             fix_scale = ((0.0, 0.0, 0.0),)
-        self.fix_scale = nn.Parameter(
-            torch.tensor(fix_scale), requires_grad=False
-        )
+        self.fix_scale = nn.Parameter(torch.tensor(fix_scale), requires_grad=False)
         self.num_pts = len(self.fix_scale) + num_learnable_pts
         if num_learnable_pts > 0:
             self.learnable_fc = Linear(self.embed_dims, num_learnable_pts * 3)
@@ -198,9 +192,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
                 .sigmoid()
                 - 0.5
             )
-            key_points = torch.cat(
-                [key_points, learnable_scale * size], dim=-2
-            )
+            key_points = torch.cat([key_points, learnable_scale * size], dim=-2)
 
         rotation_mat = anchor.new_zeros([bs, num_anchor, 3, 3])
 
@@ -228,21 +220,17 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         for i, t_time in enumerate(temp_timestamps):
             time_interval = cur_timestamp - t_time
             translation = (
-                velocity
-                * time_interval.to(dtype=velocity.dtype)[:, None, None]
+                velocity * time_interval.to(dtype=velocity.dtype)[:, None, None]
             )
             temp_key_points = key_points - translation[:, :, None]
             T_cur2temp = T_cur2temp_list[i].to(dtype=key_points.dtype)
-            temp_key_points = (
-                T_cur2temp[:, None, None, :3]
-                @ torch.cat(
-                    [
-                        temp_key_points,
-                        torch.ones_like(temp_key_points[..., :1]),
-                    ],
-                    dim=-1,
-                ).unsqueeze(-1)
-            )
+            temp_key_points = T_cur2temp[:, None, None, :3] @ torch.cat(
+                [
+                    temp_key_points,
+                    torch.ones_like(temp_key_points[..., :1]),
+                ],
+                dim=-1,
+            ).unsqueeze(-1)
             temp_key_points = temp_key_points.squeeze(-1)
             temp_key_points_list.append(temp_key_points)
         return key_points, temp_key_points_list
@@ -259,17 +247,13 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         for i in range(len(T_src2dst_list)):
             vel = anchor[..., VX:]
             vel_dim = vel.shape[-1]
-            T_src2dst = torch.unsqueeze(
-                T_src2dst_list[i].to(dtype=anchor.dtype), dim=1
-            )
+            T_src2dst = torch.unsqueeze(T_src2dst_list[i].to(dtype=anchor.dtype), dim=1)
 
             center = anchor[..., [X, Y, Z]]
             if time_intervals is not None:
                 time_interval = time_intervals[i]
             elif src_timestamp is not None and dst_timestamps is not None:
-                time_interval = (src_timestamp - dst_timestamps[i]).to(
-                    dtype=vel.dtype
-                )
+                time_interval = (src_timestamp - dst_timestamps[i]).to(dtype=vel.dtype)
             else:
                 time_interval = None
             if time_interval is not None:
@@ -277,9 +261,7 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
                 translation = translation.transpose(0, -1)
                 center = center - translation
             center = (
-                torch.matmul(
-                    T_src2dst[..., :3, :3], center[..., None]
-                ).squeeze(dim=-1)
+                torch.matmul(T_src2dst[..., :3, :3], center[..., None]).squeeze(dim=-1)
                 + T_src2dst[..., :3, 3]
             )
             size = anchor[..., [W, L, H]]

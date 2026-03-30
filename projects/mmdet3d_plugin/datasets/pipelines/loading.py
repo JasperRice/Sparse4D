@@ -1,5 +1,5 @@
-import numpy as np
 import mmcv
+import numpy as np
 from mmdet.datasets.builder import PIPELINES
 
 

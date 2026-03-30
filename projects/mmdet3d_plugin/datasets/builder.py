@@ -7,15 +7,13 @@ import numpy as np
 from mmcv.parallel import collate
 from mmcv.runner import get_dist_info
 from mmcv.utils import Registry, build_from_cfg
+from mmdet.datasets.samplers import GroupSampler
 from torch.utils.data import DataLoader
 
-from mmdet.datasets.samplers import GroupSampler
-from projects.mmdet3d_plugin.datasets.samplers import (
-    GroupInBatchSampler,
-    DistributedGroupSampler,
-    DistributedSampler,
-    build_sampler
-)
+from projects.mmdet3d_plugin.datasets.samplers import (DistributedGroupSampler,
+                                                       DistributedSampler,
+                                                       GroupInBatchSampler,
+                                                       build_sampler)
 
 
 def build_dataloader(
@@ -50,7 +48,7 @@ def build_dataloader(
     """
     rank, world_size = get_dist_info()
     batch_sampler = None
-    if runner_type == 'IterBasedRunner':
+    if runner_type == "IterBasedRunner":
         print("Use GroupInBatchSampler !!!")
         batch_sampler = GroupInBatchSampler(
             dataset,
@@ -68,9 +66,11 @@ def build_dataloader(
         if shuffle:
             print("Use DistributedGroupSampler !!!")
             sampler = build_sampler(
-                shuffler_sampler
-                if shuffler_sampler is not None
-                else dict(type="DistributedGroupSampler"),
+                (
+                    shuffler_sampler
+                    if shuffler_sampler is not None
+                    else dict(type="DistributedGroupSampler")
+                ),
                 dict(
                     dataset=dataset,
                     samples_per_gpu=samples_per_gpu,
@@ -81,9 +81,11 @@ def build_dataloader(
             )
         else:
             sampler = build_sampler(
-                nonshuffler_sampler
-                if nonshuffler_sampler is not None
-                else dict(type="DistributedSampler"),
+                (
+                    nonshuffler_sampler
+                    if nonshuffler_sampler is not None
+                    else dict(type="DistributedSampler")
+                ),
                 dict(
                     dataset=dataset,
                     num_replicas=world_size,
@@ -133,8 +135,8 @@ def worker_init_fn(worker_id, num_workers, rank, seed):
 
 # Copyright (c) OpenMMLab. All rights reserved.
 import platform
-from mmcv.utils import Registry, build_from_cfg
 
+from mmcv.utils import Registry, build_from_cfg
 from mmdet.datasets import DATASETS
 from mmdet.datasets.builder import _concat_dataset
 
@@ -156,16 +158,11 @@ def custom_build_dataset(cfg, default_args=None):
         from mmdet3d.datasets.dataset_wrappers import CBGSDataset
     except:
         CBGSDataset = None
-    from mmdet.datasets.dataset_wrappers import (
-        ClassBalancedDataset,
-        ConcatDataset,
-        RepeatDataset,
-    )
+    from mmdet.datasets.dataset_wrappers import (ClassBalancedDataset,
+                                                 ConcatDataset, RepeatDataset)
 
     if isinstance(cfg, (list, tuple)):
-        dataset = ConcatDataset(
-            [custom_build_dataset(c, default_args) for c in cfg]
-        )
+        dataset = ConcatDataset([custom_build_dataset(c, default_args) for c in cfg])
     elif cfg["type"] == "ConcatDataset":
         dataset = ConcatDataset(
             [custom_build_dataset(c, default_args) for c in cfg["datasets"]],
@@ -181,9 +178,7 @@ def custom_build_dataset(cfg, default_args=None):
             cfg["oversample_thr"],
         )
     elif cfg["type"] == "CBGSDataset":
-        dataset = CBGSDataset(
-            custom_build_dataset(cfg["dataset"], default_args)
-        )
+        dataset = CBGSDataset(custom_build_dataset(cfg["dataset"], default_args))
     elif isinstance(cfg.get("ann_file"), (list, tuple)):
         dataset = _concat_dataset(cfg, default_args)
     else:

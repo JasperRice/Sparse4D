@@ -1,6 +1,6 @@
+import mmcv
 import numpy as np
 from sklearn.cluster import KMeans
-import mmcv
 
 from projects.mmdet3d_plugin.core.box3d import *
 

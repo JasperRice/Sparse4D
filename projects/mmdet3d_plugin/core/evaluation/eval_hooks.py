@@ -9,8 +9,8 @@ import mmcv
 import torch.distributed as dist
 from mmcv.runner import DistEvalHook as BaseDistEvalHook
 from mmcv.runner import EvalHook as BaseEvalHook
-from torch.nn.modules.batchnorm import _BatchNorm
 from mmdet.core.evaluation.eval_hooks import DistEvalHook
+from torch.nn.modules.batchnorm import _BatchNorm
 
 
 def _calc_dynamic_intervals(start_interval, dynamic_interval_list):
@@ -63,10 +63,7 @@ class CustomDistEvalHook(BaseDistEvalHook):
         if self.broadcast_bn_buffer:
             model = runner.model
             for name, module in model.named_modules():
-                if (
-                    isinstance(module, _BatchNorm)
-                    and module.track_running_stats
-                ):
+                if isinstance(module, _BatchNorm) and module.track_running_stats:
                     dist.broadcast(module.running_var, 0)
                     dist.broadcast(module.running_mean, 0)
 
@@ -77,9 +74,8 @@ class CustomDistEvalHook(BaseDistEvalHook):
         if tmpdir is None:
             tmpdir = osp.join(runner.work_dir, ".eval_hook")
 
-        from projects.mmdet3d_plugin.apis.test import (
-            custom_multi_gpu_test,
-        )  # to solve circlur  import
+        from projects.mmdet3d_plugin.apis.test import \
+            custom_multi_gpu_test  # to solve circlur  import
 
         results = custom_multi_gpu_test(
             runner.model,

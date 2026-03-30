@@ -1,6 +1,6 @@
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
 from PIL import Image
 
 
@@ -126,11 +126,7 @@ class GridMask(nn.Module):
             mask = 1 - mask
         mask = mask.expand_as(x)
         if self.offset:
-            offset = (
-                torch.from_numpy(2 * (np.random.rand(h, w) - 0.5))
-                .float()
-                .cuda()
-            )
+            offset = torch.from_numpy(2 * (np.random.rand(h, w) - 0.5)).float().cuda()
             x = x * mask + offset * (1 - mask)
         else:
             x = x * mask

@@ -10,17 +10,13 @@ import tempfile
 import time
 
 import mmcv
+import numpy as np
+import pycocotools.mask as mask_util
 import torch
 import torch.distributed as dist
 from mmcv.image import tensor2imgs
 from mmcv.runner import get_dist_info
-
 from mmdet.core import encode_mask_results
-
-
-import mmcv
-import numpy as np
-import pycocotools.mask as mask_util
 
 
 def custom_encode_mask_results(mask_results):
@@ -38,9 +34,7 @@ def custom_encode_mask_results(mask_results):
     for i in range(len(cls_segms)):
         encoded_mask_results.append(
             mask_util.encode(
-                np.array(
-                    cls_segms[i][:, :, np.newaxis], order="F", dtype="uint8"
-                )
+                np.array(cls_segms[i][:, :, np.newaxis], order="F", dtype="uint8")
             )[0]
         )  # encoded with RLE
     return [encoded_mask_results]
@@ -84,9 +78,7 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
                     "mask_results" in result.keys()
                     and result["mask_results"] is not None
                 ):
-                    mask_result = custom_encode_mask_results(
-                        result["mask_results"]
-                    )
+                    mask_result = custom_encode_mask_results(result["mask_results"])
                     mask_results.extend(mask_result)
                     have_mask = True
             else:
@@ -108,9 +100,7 @@ def custom_multi_gpu_test(model, data_loader, tmpdir=None, gpu_collect=False):
         bbox_results = collect_results_cpu(bbox_results, len(dataset), tmpdir)
         tmpdir = tmpdir + "_mask" if tmpdir is not None else None
         if have_mask:
-            mask_results = collect_results_cpu(
-                mask_results, len(dataset), tmpdir
-            )
+            mask_results = collect_results_cpu(mask_results, len(dataset), tmpdir)
         else:
             mask_results = None
 
@@ -125,9 +115,7 @@ def collect_results_cpu(result_part, size, tmpdir=None):
     if tmpdir is None:
         MAX_LEN = 512
         # 32 is whitespace
-        dir_tensor = torch.full(
-            (MAX_LEN,), 32, dtype=torch.uint8, device="cuda"
-        )
+        dir_tensor = torch.full((MAX_LEN,), 32, dtype=torch.uint8, device="cuda")
         if rank == 0:
             mmcv.mkdir_or_exist(".dist_test")
             tmpdir = tempfile.mkdtemp(dir=".dist_test")

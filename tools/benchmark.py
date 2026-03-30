@@ -1,19 +1,19 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import sys
 import time
+
 import torch
 from mmcv import Config
 from mmcv.parallel import MMDataParallel
 from mmcv.runner import load_checkpoint, wrap_fp16_model
-import sys
 
 sys.path.append(".")
-from projects.mmdet3d_plugin.datasets.builder import build_dataloader
-from projects.mmdet3d_plugin.datasets import custom_build_dataset
-
 # from mmdet3d.datasets import build_dataloader, build_dataset
 from mmdet.models import build_detector
 
+from projects.mmdet3d_plugin.datasets import custom_build_dataset
+from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from tools.fuse_conv_bn import fuse_module
 
 
@@ -22,9 +22,7 @@ def parse_args():
     parser.add_argument("config", help="test config file path")
     parser.add_argument("--checkpoint", default=None, help="checkpoint file")
     parser.add_argument("--samples", default=2000, help="samples to benchmark")
-    parser.add_argument(
-        "--log-interval", default=50, help="interval of logging"
-    )
+    parser.add_argument("--log-interval", default=50, help="interval of logging")
     parser.add_argument(
         "--fuse-conv-bn",
         action="store_true",
@@ -38,9 +36,7 @@ def parse_args():
 def get_max_memory(model):
     device = getattr(model, "output_device", None)
     mem = torch.cuda.max_memory_allocated(device=device)
-    mem_mb = torch.tensor(
-        [mem / (1024 * 1024)], dtype=torch.int, device=device
-    )
+    mem_mb = torch.tensor([mem / (1024 * 1024)], dtype=torch.int, device=device)
     return mem_mb.item()
 
 

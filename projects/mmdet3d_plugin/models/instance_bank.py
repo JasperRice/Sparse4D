@@ -1,11 +1,9 @@
 import numpy as np
 import torch
-from torch import nn
 import torch.nn.functional as F
-import numpy as np
-
-from mmcv.utils import build_from_cfg
 from mmcv.cnn.bricks.registry import PLUGIN_LAYERS
+from mmcv.utils import build_from_cfg
+from torch import nn
 
 __all__ = ["InstanceBank"]
 
@@ -13,9 +11,9 @@ __all__ = ["InstanceBank"]
 def topk(confidence, k, *inputs):
     bs, N = confidence.shape[:2]
     confidence, indices = torch.topk(confidence, k, dim=1)
-    indices = (
-        indices + torch.arange(bs, device=indices.device)[:, None] * N
-    ).reshape(-1)
+    indices = (indices + torch.arange(bs, device=indices.device)[:, None] * N).reshape(
+        -1
+    )
     outputs = []
     for input in inputs:
         outputs.append(input.flatten(end_dim=1)[indices].reshape(bs, k, -1))
@@ -81,15 +79,10 @@ class InstanceBank(nn.Module):
         self.prev_id = 0
 
     def get(self, batch_size, metas=None, dn_metas=None):
-        instance_feature = torch.tile(
-            self.instance_feature[None], (batch_size, 1, 1)
-        )
+        instance_feature = torch.tile(self.instance_feature[None], (batch_size, 1, 1))
         anchor = torch.tile(self.anchor[None], (batch_size, 1, 1))
 
-        if (
-            self.cached_anchor is not None
-            and batch_size == self.cached_anchor.shape[0]
-        ):
+        if self.cached_anchor is not None and batch_size == self.cached_anchor.shape[0]:
             history_time = self.metas["timestamp"]
             time_interval = metas["timestamp"] - history_time
             time_interval = time_interval.to(dtype=instance_feature.dtype)
@@ -99,8 +92,7 @@ class InstanceBank(nn.Module):
                 T_temp2cur = self.cached_anchor.new_tensor(
                     np.stack(
                         [
-                            x["T_global_inv"]
-                            @ self.metas["img_metas"][i]["T_global"]
+                            x["T_global_inv"] @ self.metas["img_metas"][i]["T_global"]
                             for i, x in enumerate(metas["img_metas"])
                         ]
                     )
@@ -162,12 +154,8 @@ class InstanceBank(nn.Module):
         _, (selected_feature, selected_anchor) = topk(
             confidence, N, instance_feature, anchor
         )
-        selected_feature = torch.cat(
-            [self.cached_feature, selected_feature], dim=1
-        )
-        selected_anchor = torch.cat(
-            [self.cached_anchor, selected_anchor], dim=1
-        )
+        selected_feature = torch.cat([self.cached_feature, selected_feature], dim=1)
+        selected_anchor = torch.cat([self.cached_anchor, selected_anchor], dim=1)
         instance_feature = torch.where(
             self.mask[:, None, None], selected_feature, instance_feature
         )
@@ -180,9 +168,7 @@ class InstanceBank(nn.Module):
             )
 
         if num_dn > 0:
-            instance_feature = torch.cat(
-                [instance_feature, dn_instance_feature], dim=1
-            )
+            instance_feature = torch.cat([instance_feature, dn_instance_feature], dim=1)
             anchor = torch.cat([anchor, dn_anchor], dim=1)
         return instance_feature, anchor
 
@@ -243,9 +229,7 @@ class InstanceBank(nn.Module):
                 temp_conf = confidence
         else:
             temp_conf = self.temp_confidence
-        instance_id = topk(temp_conf, self.num_temp_instances, instance_id)[1][
-            0
-        ]
+        instance_id = topk(temp_conf, self.num_temp_instances, instance_id)[1][0]
         instance_id = instance_id.squeeze(dim=-1)
         self.instance_id = F.pad(
             instance_id,

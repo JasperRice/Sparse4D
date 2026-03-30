@@ -2,7 +2,6 @@
 from typing import Optional
 
 import torch
-
 from mmdet.core.bbox.builder import BBOX_CODERS
 
 from projects.mmdet3d_plugin.core.box3d import *

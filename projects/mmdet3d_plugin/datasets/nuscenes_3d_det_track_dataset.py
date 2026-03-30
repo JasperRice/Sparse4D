@@ -1,27 +1,24 @@
-import random
+import copy
 import math
 import os
-from os import path as osp
-import cv2
+import random
 import tempfile
-import copy
+from os import path as osp
 
-import numpy as np
-import torch
-from torch.utils.data import Dataset
-import pyquaternion
-from nuscenes.utils.data_classes import Box as NuScenesBox
-from nuscenes.eval.detection.config import config_factory as det_configs
-from nuscenes.eval.common.config import config_factory as track_configs
-
+import cv2
 import mmcv
+import numpy as np
+import pyquaternion
+import torch
 from mmcv.utils import print_log
 from mmdet.datasets import DATASETS
 from mmdet.datasets.pipelines import Compose
-from .utils import (
-    draw_lidar_bbox3d_on_img,
-    draw_lidar_bbox3d_on_bev,
-)
+from nuscenes.eval.common.config import config_factory as track_configs
+from nuscenes.eval.detection.config import config_factory as det_configs
+from nuscenes.utils.data_classes import Box as NuScenesBox
+from torch.utils.data import Dataset
+
+from .utils import draw_lidar_bbox3d_on_bev, draw_lidar_bbox3d_on_img
 
 
 @DATASETS.register_module()
@@ -155,9 +152,7 @@ class NuScenes3DDetTrackDataset(Dataset):
 
         if self.sequences_split_num != 1:
             if self.sequences_split_num == "all":
-                self.flag = np.array(
-                    range(len(self.data_infos)), dtype=np.int64
-                )
+                self.flag = np.array(range(len(self.data_infos)), dtype=np.int64)
             else:
                 bin_counts = np.bincount(self.flag)
                 new_flags = []
@@ -169,8 +164,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                                 0,
                                 bin_counts[curr_flag],
                                 math.ceil(
-                                    bin_counts[curr_flag]
-                                    / self.sequences_split_num
+                                    bin_counts[curr_flag] / self.sequences_split_num
                                 ),
                             )
                         )
@@ -201,10 +195,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             resize_dims = (int(W * resize), int(H * resize))
             newW, newH = resize_dims
             crop_h = (
-                int(
-                    (1 - np.random.uniform(*self.data_aug_conf["bot_pct_lim"]))
-                    * newH
-                )
+                int((1 - np.random.uniform(*self.data_aug_conf["bot_pct_lim"])) * newH)
                 - fH
             )
             crop_w = int(np.random.uniform(0, max(0, newW - fW)))
@@ -218,10 +209,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             resize = max(fH / H, fW / W)
             resize_dims = (int(W * resize), int(H * resize))
             newW, newH = resize_dims
-            crop_h = (
-                int((1 - np.mean(self.data_aug_conf["bot_pct_lim"])) * newH)
-                - fH
-            )
+            crop_h = int((1 - np.mean(self.data_aug_conf["bot_pct_lim"])) * newH) - fH
             crop_w = int(max(0, newW - fW) / 2)
             crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
             flip = False
@@ -304,9 +292,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                 image_paths.append(cam_info["data_path"])
                 # obtain lidar to image transformation matrix
                 lidar2cam_r = np.linalg.inv(cam_info["sensor2lidar_rotation"])
-                lidar2cam_t = (
-                    cam_info["sensor2lidar_translation"] @ lidar2cam_r.T
-                )
+                lidar2cam_t = cam_info["sensor2lidar_translation"] @ lidar2cam_r.T
                 lidar2cam_rt = np.eye(4)
                 lidar2cam_rt[:3, :3] = lidar2cam_r.T
                 lidar2cam_rt[3, :3] = -lidar2cam_t
@@ -452,9 +438,7 @@ class NuScenes3DDetTrackDataset(Dataset):
         from nuscenes import NuScenes
 
         output_dir = osp.join(*osp.split(result_path)[:-1])
-        nusc = NuScenes(
-            version=self.version, dataroot=self.data_root, verbose=False
-        )
+        nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=False)
         eval_set_map = {
             "v1.0-mini": "mini_val",
             "v1.0-trainval": "val",
@@ -479,17 +463,13 @@ class NuScenes3DDetTrackDataset(Dataset):
             for name in self.CLASSES:
                 for k, v in metrics["label_aps"][name].items():
                     val = float("{:.4f}".format(v))
-                    detail[
-                        "{}/{}_AP_dist_{}".format(metric_prefix, name, k)
-                    ] = val
+                    detail["{}/{}_AP_dist_{}".format(metric_prefix, name, k)] = val
                 for k, v in metrics["label_tp_errors"][name].items():
                     val = float("{:.4f}".format(v))
                     detail["{}/{}_{}".format(metric_prefix, name, k)] = val
                 for k, v in metrics["tp_errors"].items():
                     val = float("{:.4f}".format(v))
-                    detail[
-                        "{}/{}".format(metric_prefix, self.ErrNameMapping[k])
-                    ] = val
+                    detail["{}/{}".format(metric_prefix, self.ErrNameMapping[k])] = val
 
             detail["{}/NDS".format(metric_prefix)] = metrics["nd_score"]
             detail["{}/mAP".format(metric_prefix)] = metrics["mean_ap"]
@@ -556,11 +536,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                 results_ = [out[name] for out in results]
                 tmp_file_ = osp.join(jsonfile_prefix, name)
                 result_files.update(
-                    {
-                        name: self._format_bbox(
-                            results_, tmp_file_, tracking=tracking
-                        )
-                    }
+                    {name: self._format_bbox(results_, tmp_file_, tracking=tracking)}
                 )
         return result_files, tmp_dir
 
@@ -591,9 +567,7 @@ class NuScenes3DDetTrackDataset(Dataset):
                     )
                 results_dict.update(ret_dict)
             elif isinstance(result_files, str):
-                results_dict = self._evaluate_single(
-                    result_files, tracking=tracking
-                )
+                results_dict = self._evaluate_single(result_files, tracking=tracking)
             if tmp_dir is not None:
                 tmp_dir.cleanup()
 
@@ -626,9 +600,7 @@ class NuScenes3DDetTrackDataset(Dataset):
             if "instance_ids" in result and self.tracking:
                 color = []
                 for id in result["instance_ids"].cpu().numpy().tolist():
-                    color.append(
-                        self.ID_COLOR_MAP[int(id % len(self.ID_COLOR_MAP))]
-                    )
+                    color.append(self.ID_COLOR_MAP[int(id % len(self.ID_COLOR_MAP))])
             elif "labels_3d" in result:
                 color = []
                 for id in result["labels_3d"].cpu().numpy().tolist():

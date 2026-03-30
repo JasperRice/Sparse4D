@@ -4,9 +4,10 @@
 #  Modified by Zhiqi Li
 # ---------------------------------------------
 
-from .mmdet_train import custom_train_detector
 # from mmseg.apis import train_segmentor
 from mmdet.apis import train_detector
+
+from .mmdet_train import custom_train_detector
 
 
 def custom_train_model(

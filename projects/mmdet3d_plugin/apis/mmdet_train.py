@@ -3,36 +3,27 @@
 # ---------------------------------------------
 #  Modified by Zhiqi Li
 # ---------------------------------------------
+import os.path as osp
 import random
+import time
 import warnings
 
 import numpy as np
 import torch
 import torch.distributed as dist
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
-from mmcv.runner import (
-    HOOKS,
-    DistSamplerSeedHook,
-    EpochBasedRunner,
-    Fp16OptimizerHook,
-    OptimizerHook,
-    build_optimizer,
-    build_runner,
-    get_dist_info,
-)
+from mmcv.runner import (HOOKS, DistSamplerSeedHook, EpochBasedRunner,
+                         Fp16OptimizerHook, OptimizerHook, build_optimizer,
+                         build_runner, get_dist_info)
 from mmcv.utils import build_from_cfg
-
 from mmdet.core import EvalHook
-
 from mmdet.datasets import build_dataset, replace_ImageToTensor
 from mmdet.utils import get_root_logger
-import time
-import os.path as osp
-from projects.mmdet3d_plugin.datasets.builder import build_dataloader
-from projects.mmdet3d_plugin.core.evaluation.eval_hooks import (
-    CustomDistEvalHook,
-)
+
+from projects.mmdet3d_plugin.core.evaluation.eval_hooks import \
+    CustomDistEvalHook
 from projects.mmdet3d_plugin.datasets import custom_build_dataset
+from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 
 
 def custom_train_detector(
@@ -102,9 +93,7 @@ def custom_train_detector(
         )
 
     else:
-        model = MMDataParallel(
-            model.cuda(cfg.gpu_ids[0]), device_ids=cfg.gpu_ids
-        )
+        model = MMDataParallel(model.cuda(cfg.gpu_ids[0]), device_ids=cfg.gpu_ids)
 
     # build runner
     optimizer = build_optimizer(model, cfg.optimizer)
@@ -173,9 +162,7 @@ def custom_train_detector(
         if val_samples_per_gpu > 1:
             assert False
             # Replace 'ImageToTensor' to 'DefaultFormatBundle'
-            cfg.data.val.pipeline = replace_ImageToTensor(
-                cfg.data.val.pipeline
-            )
+            cfg.data.val.pipeline = replace_ImageToTensor(cfg.data.val.pipeline)
         val_dataset = custom_build_dataset(cfg.data.val, dict(test_mode=True))
 
         val_dataloader = build_dataloader(

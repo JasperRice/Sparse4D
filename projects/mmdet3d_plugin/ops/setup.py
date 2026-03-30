@@ -2,11 +2,8 @@ import os
 
 import torch
 from setuptools import setup
-from torch.utils.cpp_extension import (
-    BuildExtension,
-    CppExtension,
-    CUDAExtension,
-)
+from torch.utils.cpp_extension import (BuildExtension, CppExtension,
+                                       CUDAExtension)
 
 
 def make_cuda_ext(

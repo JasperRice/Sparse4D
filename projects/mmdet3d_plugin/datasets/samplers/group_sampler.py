@@ -1,13 +1,14 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import math
+import random
 
 import numpy as np
 import torch
+from IPython import embed
 from mmcv.runner import get_dist_info
 from torch.utils.data import Sampler
+
 from .sampler import SAMPLER
-import random
-from IPython import embed
 
 
 @SAMPLER.register_module()
@@ -80,9 +81,7 @@ class DistributedGroupSampler(Sampler):
                     list(torch.randperm(int(size), generator=g).numpy())
                 ].tolist()
                 extra = int(
-                    math.ceil(
-                        size * 1.0 / self.samples_per_gpu / self.num_replicas
-                    )
+                    math.ceil(size * 1.0 / self.samples_per_gpu / self.num_replicas)
                 ) * self.samples_per_gpu * self.num_replicas - len(indice)
                 # pad indice
                 tmp = indice.copy()
@@ -96,13 +95,9 @@ class DistributedGroupSampler(Sampler):
         indices = [
             indices[j]
             for i in list(
-                torch.randperm(
-                    len(indices) // self.samples_per_gpu, generator=g
-                )
+                torch.randperm(len(indices) // self.samples_per_gpu, generator=g)
             )
-            for j in range(
-                i * self.samples_per_gpu, (i + 1) * self.samples_per_gpu
-            )
+            for j in range(i * self.samples_per_gpu, (i + 1) * self.samples_per_gpu)
         ]
 
         # subsample

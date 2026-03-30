@@ -4,19 +4,15 @@ from typing import List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.cuda.amp.autocast_mode import autocast
-
-from mmcv.cnn import Linear, build_activation_layer, build_norm_layer
-from mmcv.runner.base_module import Sequential, BaseModule
-from mmcv.cnn.bricks.transformer import FFN
-from mmcv.utils import build_from_cfg
+from mmcv.cnn import (Linear, build_activation_layer, build_norm_layer,
+                      constant_init, xavier_init)
 from mmcv.cnn.bricks.drop import build_dropout
-from mmcv.cnn import xavier_init, constant_init
-from mmcv.cnn.bricks.registry import (
-    ATTENTION,
-    PLUGIN_LAYERS,
-    FEEDFORWARD_NETWORK,
-)
+from mmcv.cnn.bricks.registry import (ATTENTION, FEEDFORWARD_NETWORK,
+                                      PLUGIN_LAYERS)
+from mmcv.cnn.bricks.transformer import FFN
+from mmcv.runner.base_module import BaseModule, Sequential
+from mmcv.utils import build_from_cfg
+from torch.cuda.amp.autocast_mode import autocast
 
 try:
     from ..ops import deformable_aggregation_function as DAF
@@ -84,20 +80,14 @@ class DeformableFeatureAggregation(BaseModule):
         if temporal_fusion_module is not None:
             if "embed_dims" not in temporal_fusion_module:
                 temporal_fusion_module["embed_dims"] = embed_dims
-            self.temp_module = build_from_cfg(
-                temporal_fusion_module, PLUGIN_LAYERS
-            )
+            self.temp_module = build_from_cfg(temporal_fusion_module, PLUGIN_LAYERS)
         else:
             self.temp_module = None
         self.output_proj = Linear(embed_dims, embed_dims)
 
         if use_camera_embed:
-            self.camera_encoder = Sequential(
-                *linear_relu_ln(embed_dims, 1, 2, 12)
-            )
-            self.weights_fc = Linear(
-                embed_dims, num_groups * num_levels * self.num_pts
-            )
+            self.camera_encoder = Sequential(*linear_relu_ln(embed_dims, 1, 2, 12))
+            self.weights_fc = Linear(embed_dims, num_groups * num_levels * self.num_pts)
         else:
             self.camera_encoder = None
             self.weights_fc = Linear(
@@ -167,9 +157,7 @@ class DeformableFeatureAggregation(BaseModule):
         feature = instance_feature + anchor_embed
         if self.camera_encoder is not None:
             camera_embed = self.camera_encoder(
-                metas["projection_mat"][:, :, :3].reshape(
-                    bs, self.num_cams, -1
-                )
+                metas["projection_mat"][:, :, :3].reshape(bs, self.num_cams, -1)
             )
             feature = feature[:, :, None] + camera_embed[:, None]
 
@@ -187,13 +175,9 @@ class DeformableFeatureAggregation(BaseModule):
             )
         )
         if self.training and self.attn_drop > 0:
-            mask = torch.rand(
-                bs, num_anchor, self.num_cams, 1, self.num_pts, 1
-            )
+            mask = torch.rand(bs, num_anchor, self.num_cams, 1, self.num_pts, 1)
             mask = mask.to(device=weights.device, dtype=weights.dtype)
-            weights = ((mask > self.attn_drop) * weights) / (
-                1 - self.attn_drop
-            )
+            weights = ((mask > self.attn_drop) * weights) / (1 - self.attn_drop)
         return weights
 
     @staticmethod
@@ -206,9 +190,7 @@ class DeformableFeatureAggregation(BaseModule):
         points_2d = torch.matmul(
             projection_mat[:, :, None, None], pts_extend[:, None, ..., None]
         ).squeeze(-1)
-        points_2d = points_2d[..., :2] / torch.clamp(
-            points_2d[..., 2:3], min=1e-5
-        )
+        points_2d = points_2d[..., :2] / torch.clamp(points_2d[..., 2:3], min=1e-5)
         if image_wh is not None:
             points_2d = points_2d / image_wh[:, :, None, None]
         return points_2d
@@ -233,9 +215,7 @@ class DeformableFeatureAggregation(BaseModule):
         features = []
         for fm in feature_maps:
             features.append(
-                torch.nn.functional.grid_sample(
-                    fm.flatten(end_dim=1), points_2d
-                )
+                torch.nn.functional.grid_sample(fm.flatten(end_dim=1), points_2d)
             )
         features = torch.stack(features, dim=1)
         features = features.reshape(
@@ -256,9 +236,7 @@ class DeformableFeatureAggregation(BaseModule):
             features.shape[:-1] + (self.num_groups, self.group_dims)
         )
         features = features.sum(dim=2).sum(dim=2)
-        features = features.reshape(
-            bs, num_anchor, self.num_pts, self.embed_dims
-        )
+        features = features.reshape(bs, num_anchor, self.num_pts, self.embed_dims)
         return features
 
 
@@ -306,19 +284,13 @@ class DenseDepthNet(BaseModule):
         for pred, gt in zip(depth_preds, gt_depths):
             pred = pred.permute(0, 2, 3, 1).contiguous().reshape(-1)
             gt = gt.reshape(-1)
-            fg_mask = torch.logical_and(
-                gt > 0.0, torch.logical_not(torch.isnan(pred))
-            )
+            fg_mask = torch.logical_and(gt > 0.0, torch.logical_not(torch.isnan(pred)))
             gt = gt[fg_mask]
             pred = pred[fg_mask]
             pred = torch.clip(pred, 0.0, self.max_depth)
             with autocast(enabled=False):
                 error = torch.abs(pred - gt).sum()
-                _loss = (
-                    error
-                    / max(1.0, len(gt) * len(depth_preds))
-                    * self.loss_weight
-                )
+                _loss = error / max(1.0, len(gt) * len(depth_preds)) * self.loss_weight
             loss = loss + _loss
         return loss
 
@@ -340,9 +312,7 @@ class AsymmetricFFN(BaseModule):
         **kwargs,
     ):
         super(AsymmetricFFN, self).__init__(init_cfg)
-        assert num_fcs >= 2, (
-            "num_fcs should be no less " f"than 2. got {num_fcs}."
-        )
+        assert num_fcs >= 2, "num_fcs should be no less " f"than 2. got {num_fcs}."
         self.in_channels = in_channels
         self.pre_norm = pre_norm
         self.embed_dims = embed_dims
@@ -370,9 +340,7 @@ class AsymmetricFFN(BaseModule):
         layers.append(nn.Dropout(ffn_drop))
         self.layers = Sequential(*layers)
         self.dropout_layer = (
-            build_dropout(dropout_layer)
-            if dropout_layer
-            else torch.nn.Identity()
+            build_dropout(dropout_layer) if dropout_layer else torch.nn.Identity()
         )
         self.add_identity = add_identity
         if self.add_identity:

@@ -1,6 +1,6 @@
 # https://github.com/Divadi/SOLOFusion/blob/main/mmdet3d/datasets/samplers/infinite_group_each_sample_in_batch_sampler.py
-import itertools
 import copy
+import itertools
 
 import numpy as np
 import torch
@@ -132,38 +132,30 @@ class GroupInBatchSampler(Sampler):
                     # Finished current group, refill with next group
                     # skip = False
                     new_group_idx = next(
-                        self.group_indices_per_global_sample_idx[
-                            local_sample_idx
-                        ]
+                        self.group_indices_per_global_sample_idx[local_sample_idx]
                     )
-                    self.buffer_per_local_sample[
-                        local_sample_idx
-                    ] = copy.deepcopy(
+                    self.buffer_per_local_sample[local_sample_idx] = copy.deepcopy(
                         self.group_idx_to_sample_idxs[new_group_idx]
                     )
                     if np.random.uniform() < self.sequence_flip_prob:
-                        self.buffer_per_local_sample[
-                            local_sample_idx
-                        ] = self.buffer_per_local_sample[local_sample_idx][
-                            ::-1
-                        ]
+                        self.buffer_per_local_sample[local_sample_idx] = (
+                            self.buffer_per_local_sample[local_sample_idx][::-1]
+                        )
                     if self.dataset.keep_consistent_seq_aug:
-                        self.aug_per_local_sample[
-                            local_sample_idx
-                        ] = self.dataset.get_augmentation()
+                        self.aug_per_local_sample[local_sample_idx] = (
+                            self.dataset.get_augmentation()
+                        )
 
                 if not self.dataset.keep_consistent_seq_aug:
-                    self.aug_per_local_sample[
-                        local_sample_idx
-                    ] = self.dataset.get_augmentation()
+                    self.aug_per_local_sample[local_sample_idx] = (
+                        self.dataset.get_augmentation()
+                    )
 
                 if skip:
                     self.buffer_per_local_sample[local_sample_idx].pop(0)
                 curr_batch.append(
                     dict(
-                        idx=self.buffer_per_local_sample[local_sample_idx].pop(
-                            0
-                        ),
+                        idx=self.buffer_per_local_sample[local_sample_idx].pop(0),
                         aug_config=self.aug_per_local_sample[local_sample_idx],
                     )
                 )

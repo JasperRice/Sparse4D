@@ -1,5 +1,5 @@
-import numpy as np
 import mmcv
+import numpy as np
 from mmcv.parallel import DataContainer as DC
 from mmdet.datasets.builder import PIPELINES
 from mmdet.datasets.pipelines import to_tensor
@@ -19,10 +19,7 @@ class MultiScaleDepthMapGenerator(object):
         for i, lidar2img in enumerate(input_dict["lidar2img"]):
             H, W = input_dict["img_shape"][i][:2]
 
-            pts_2d = (
-                np.squeeze(lidar2img[:3, :3] @ points, axis=-1)
-                + lidar2img[:3, 3]
-            )
+            pts_2d = np.squeeze(lidar2img[:3, :3] @ points, axis=-1) + lidar2img[:3, 3]
             pts_2d[:, :2] /= pts_2d[:, 2:3]
             U = np.round(pts_2d[:, 0]).astype(np.int32)
             V = np.round(pts_2d[:, 1]).astype(np.int32)
@@ -61,9 +58,7 @@ class NuScenesSparse4DAdaptor(object):
         pass
 
     def __call__(self, input_dict):
-        input_dict["projection_mat"] = np.float32(
-            np.stack(input_dict["lidar2img"])
-        )
+        input_dict["projection_mat"] = np.float32(np.stack(input_dict["lidar2img"]))
         input_dict["image_wh"] = np.ascontiguousarray(
             np.array(input_dict["img_shape"], dtype=np.float32)[:, :2][:, ::-1]
         )
@@ -133,9 +128,7 @@ class InstanceNameFilter(object):
         input_dict["gt_bboxes_3d"] = input_dict["gt_bboxes_3d"][gt_bboxes_mask]
         input_dict["gt_labels_3d"] = input_dict["gt_labels_3d"][gt_bboxes_mask]
         if "instance_inds" in input_dict:
-            input_dict["instance_inds"] = input_dict["instance_inds"][
-                gt_bboxes_mask
-            ]
+            input_dict["instance_inds"] = input_dict["instance_inds"][gt_bboxes_mask]
 
         return input_dict
 
@@ -148,17 +141,13 @@ class InstanceNameFilter(object):
 
 @PIPELINES.register_module()
 class CircleObjectRangeFilter(object):
-    def __init__(
-        self, class_dist_thred=[52.5] * 5 + [31.5] + [42] * 3 + [31.5]
-    ):
+    def __init__(self, class_dist_thred=[52.5] * 5 + [31.5] + [42] * 3 + [31.5]):
         self.class_dist_thred = class_dist_thred
 
     def __call__(self, input_dict):
         gt_bboxes_3d = input_dict["gt_bboxes_3d"]
         gt_labels_3d = input_dict["gt_labels_3d"]
-        dist = np.sqrt(
-            np.sum(gt_bboxes_3d[:, :2] ** 2, axis=-1)
-        )
+        dist = np.sqrt(np.sum(gt_bboxes_3d[:, :2] ** 2, axis=-1))
         mask = np.array([False] * len(dist))
         for label_idx, dist_thred in enumerate(self.class_dist_thred):
             mask = np.logical_or(
@@ -211,9 +200,7 @@ class NormalizeMultiviewImage(object):
             mmcv.imnormalize(img, self.mean, self.std, self.to_rgb)
             for img in results["img"]
         ]
-        results["img_norm_cfg"] = dict(
-            mean=self.mean, std=self.std, to_rgb=self.to_rgb
-        )
+        results["img_norm_cfg"] = dict(mean=self.mean, std=self.std, to_rgb=self.to_rgb)
         return results
 
     def __repr__(self):

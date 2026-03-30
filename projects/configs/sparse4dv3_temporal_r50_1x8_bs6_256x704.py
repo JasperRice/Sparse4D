@@ -67,9 +67,7 @@ num_iters_per_epoch = int(28130 // (num_gpus * batch_size))
 num_epochs = 100
 checkpoint_epoch_interval = 20
 
-checkpoint_config = dict(
-    interval=num_iters_per_epoch * checkpoint_epoch_interval
-)
+checkpoint_config = dict(interval=num_iters_per_epoch * checkpoint_epoch_interval)
 log_config = dict(
     interval=51,
     hooks=[
@@ -190,15 +188,17 @@ model = dict(
             ]
             * (num_decoder - num_single_frame_decoder)
         )[2:],
-        temp_graph_model=dict(
-            type="MultiheadAttention",
-            embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
-            num_heads=num_groups,
-            batch_first=True,
-            dropout=drop_out,
-        )
-        if temporal
-        else None,
+        temp_graph_model=(
+            dict(
+                type="MultiheadAttention",
+                embed_dims=embed_dims if not decouple_attn else embed_dims * 2,
+                num_heads=num_groups,
+                batch_first=True,
+                dropout=drop_out,
+            )
+            if temporal
+            else None
+        ),
         graph_model=dict(
             type="MultiheadAttention",
             embed_dims=embed_dims if not decouple_attn else embed_dims * 2,

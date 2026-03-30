@@ -2,21 +2,17 @@
 from inspect import signature
 
 import torch
-
-from mmcv.runner import force_fp32, auto_fp16
-from mmcv.utils import build_from_cfg
 from mmcv.cnn.bricks.registry import PLUGIN_LAYERS
-from mmdet.models import (
-    DETECTORS,
-    BaseDetector,
-    build_backbone,
-    build_head,
-    build_neck,
-)
+from mmcv.runner import auto_fp16, force_fp32
+from mmcv.utils import build_from_cfg
+from mmdet.models import (DETECTORS, BaseDetector, build_backbone, build_head,
+                          build_neck)
+
 from .grid_mask import GridMask
 
 try:
     from ..ops import feature_maps_format
+
     DAF_VALID = True
 except:
     DAF_VALID = False
@@ -76,9 +72,7 @@ class Sparse4D(BaseDetector):
         if self.img_neck is not None:
             feature_maps = list(self.img_neck(feature_maps))
         for i, feat in enumerate(feature_maps):
-            feature_maps[i] = torch.reshape(
-                feat, (bs, num_cams) + feat.shape[1:]
-            )
+            feature_maps[i] = torch.reshape(feat, (bs, num_cams) + feat.shape[1:])
         if return_depth and self.depth_branch is not None:
             depths = self.depth_branch(feature_maps, metas.get("focal"))
         else:

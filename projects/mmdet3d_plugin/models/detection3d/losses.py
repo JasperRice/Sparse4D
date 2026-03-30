@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-
 from mmcv.utils import build_from_cfg
 from mmdet.models.builder import LOSSES
 
@@ -51,9 +50,7 @@ class SparseBox3DLoss(nn.Module):
                 < 0
             )
             if_reverse = (
-                torch.isin(
-                    cls_target, cls_target.new_tensor(self.cls_allow_reverse)
-                )
+                torch.isin(cls_target, cls_target.new_tensor(self.cls_allow_reverse))
                 & if_reverse
             )
             box_target[..., [SIN_YAW, COS_YAW]] = torch.where(
@@ -63,9 +60,7 @@ class SparseBox3DLoss(nn.Module):
             )
 
         output = {}
-        box_loss = self.loss_box(
-            box, box_target, weight=weight, avg_factor=avg_factor
-        )
+        box_loss = self.loss_box(box, box_target, weight=weight, avg_factor=avg_factor)
         output[f"loss_box{suffix}"] = box_loss
 
         if quality is not None:

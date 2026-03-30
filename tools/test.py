@@ -1,32 +1,26 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
-import mmcv
 import os
-import torch
 import warnings
+
+import mmcv
+import torch
 from mmcv import Config, DictAction
 from mmcv.cnn import fuse_conv_bn
 from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
-from mmcv.runner import (
-    get_dist_info,
-    init_dist,
-    load_checkpoint,
-    wrap_fp16_model,
-)
-
-from mmdet.apis import single_gpu_test, multi_gpu_test, set_random_seed
-from mmdet.datasets import replace_ImageToTensor, build_dataset
+from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
+                         wrap_fp16_model)
+from mmdet.apis import multi_gpu_test, set_random_seed, single_gpu_test
 from mmdet.datasets import build_dataloader as build_dataloader_origin
+from mmdet.datasets import build_dataset, replace_ImageToTensor
 from mmdet.models import build_detector
 
-from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from projects.mmdet3d_plugin.apis.test import custom_multi_gpu_test
+from projects.mmdet3d_plugin.datasets.builder import build_dataloader
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="MMDet test (and eval) a model"
-    )
+    parser = argparse.ArgumentParser(description="MMDet test (and eval) a model")
     parser.add_argument("config", help="test config file path")
     parser.add_argument("checkpoint", help="checkpoint file")
     parser.add_argument("--out", help="output result file in pickle format")
@@ -51,9 +45,7 @@ def parse_args():
         ' "segm", "proposal" for COCO, and "mAP", "recall" for PASCAL VOC',
     )
     parser.add_argument("--show", action="store_true", help="show results")
-    parser.add_argument(
-        "--show-dir", help="directory where results will be saved"
-    )
+    parser.add_argument("--show-dir", help="directory where results will be saved")
     parser.add_argument(
         "--gpu-collect",
         action="store_true",
@@ -123,9 +115,7 @@ def parse_args():
 def main():
     args = parse_args()
 
-    assert (
-        args.out or args.eval or args.format_only or args.show or args.show_dir
-    ), (
+    assert args.out or args.eval or args.format_only or args.show or args.show_dir, (
         "Please specify at least one operation (save/eval/format/show the "
         'results / save the results) with the argument "--out", "--eval"'
         ', "--format-only", "--show" or "--show-dir"'
@@ -183,9 +173,7 @@ def main():
         samples_per_gpu = cfg.data.test.pop("samples_per_gpu", 1)
         if samples_per_gpu > 1:
             # Replace 'ImageToTensor' to 'DefaultFormatBundle'
-            cfg.data.test.pipeline = replace_ImageToTensor(
-                cfg.data.test.pipeline
-            )
+            cfg.data.test.pipeline = replace_ImageToTensor(cfg.data.test.pipeline)
     elif isinstance(cfg.data.test, list):
         for ds_cfg in cfg.data.test:
             ds_cfg.test_mode = True

@@ -1,30 +1,29 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from __future__ import division
-import sys
+
 import os
+import sys
 
 print(sys.executable, os.path.abspath(__file__))
 # import init_paths # for conda pkgs submitting method
 import argparse
 import copy
-import mmcv
 import time
-import torch
 import warnings
-from mmcv import Config, DictAction
-from mmcv.runner import get_dist_info, init_dist
+from datetime import timedelta
 from os import path as osp
 
+import cv2
+import mmcv
+import torch
+from mmcv import Config, DictAction
+from mmcv.runner import get_dist_info, init_dist
 from mmdet import __version__ as mmdet_version
-from mmdet.apis import train_detector
+from mmdet.apis import set_random_seed, train_detector
 from mmdet.datasets import build_dataset
 from mmdet.models import build_detector
 from mmdet.utils import collect_env, get_root_logger
-from mmdet.apis import set_random_seed
 from torch import distributed as dist
-from datetime import timedelta
-
-import cv2
 
 cv2.setNumThreads(8)
 
@@ -33,9 +32,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Train a detector")
     parser.add_argument("config", help="train config file path")
     parser.add_argument("--work-dir", help="the dir to save logs and models")
-    parser.add_argument(
-        "--resume-from", help="the checkpoint file to resume from"
-    )
+    parser.add_argument("--resume-from", help="the checkpoint file to resume from")
     parser.add_argument(
         "--no-validate",
         action="store_true",
@@ -45,15 +42,13 @@ def parse_args():
     group_gpus.add_argument(
         "--gpus",
         type=int,
-        help="number of gpus to use "
-        "(only applicable to non-distributed training)",
+        help="number of gpus to use " "(only applicable to non-distributed training)",
     )
     group_gpus.add_argument(
         "--gpu-ids",
         type=int,
         nargs="+",
-        help="ids of gpus to use "
-        "(only applicable to non-distributed training)",
+        help="ids of gpus to use " "(only applicable to non-distributed training)",
     )
     parser.add_argument("--seed", type=int, default=0, help="random seed")
     parser.add_argument(
@@ -188,10 +183,7 @@ def main():
         comm = MPI.COMM_WORLD
         mpi_local_rank = comm.Get_rank()
         mpi_world_size = comm.Get_size()
-        print(
-            "MPI local_rank=%d, world_size=%d"
-            % (mpi_local_rank, mpi_world_size)
-        )
+        print("MPI local_rank=%d, world_size=%d" % (mpi_local_rank, mpi_world_size))
 
         # num_gpus = torch.cuda.device_count()
         device_ids_on_machines = list(range(args.gpus_per_machine))
@@ -211,9 +203,7 @@ def main():
         print("cfg.gpu_ids:", cfg.gpu_ids)
     else:
         distributed = True
-        init_dist(
-            args.launcher, timeout=timedelta(seconds=3600), **cfg.dist_params
-        )
+        init_dist(args.launcher, timeout=timedelta(seconds=3600), **cfg.dist_params)
         # re-set gpu_ids with distributed training mode
         _, world_size = get_dist_info()
         cfg.gpu_ids = range(world_size)
@@ -228,9 +218,7 @@ def main():
     # specify logger name, if we still use 'mmdet', the output info will be
     # filtered and won't be saved in the log_file
     # TODO: ugly workaround to judge whether we are training det or seg model
-    logger = get_root_logger(
-        log_file=log_file, log_level=cfg.log_level
-    )
+    logger = get_root_logger(log_file=log_file, log_level=cfg.log_level)
 
     # init the meta dict to record some important information such as
     # environment info and seed, which will be logged
@@ -239,9 +227,7 @@ def main():
     env_info_dict = collect_env()
     env_info = "\n".join([(f"{k}: {v}") for k, v in env_info_dict.items()])
     dash_line = "-" * 60 + "\n"
-    logger.info(
-        "Environment info:\n" + dash_line + env_info + "\n" + dash_line
-    )
+    logger.info("Environment info:\n" + dash_line + env_info + "\n" + dash_line)
     meta["env_info"] = env_info
     meta["config"] = cfg.pretty_text
 
@@ -252,8 +238,7 @@ def main():
     # set random seeds
     if args.seed is not None:
         logger.info(
-            f"Set random seed to {args.seed}, "
-            f"deterministic: {args.deterministic}"
+            f"Set random seed to {args.seed}, " f"deterministic: {args.deterministic}"
         )
         set_random_seed(args.seed, deterministic=args.deterministic)
     cfg.seed = args.seed
