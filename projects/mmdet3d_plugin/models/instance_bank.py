@@ -79,16 +79,28 @@ class InstanceBank(nn.Module):
         self.prev_id = 0
 
     def get(self, batch_size, metas=None, dn_metas=None):
+        """
+        时序建模: 利用历史缓存数据进行跨帧信息传递.
+        坐标对齐: 通过 anchor_handler 将历史锚点变换到当前帧坐标系, 解决目标运动与视角变化.
+        鲁棒性处理: 通过掩码过滤无效历史帧, 避免长期累积误差.
+        """
+        # 从实例库中取出基础特征 instance_feature 和锚点 anchor, 并扩展为当前 batch_size 的维度, 以供当前批次使用.
         instance_feature = torch.tile(self.instance_feature[None], (batch_size, 1, 1))
         anchor = torch.tile(self.anchor[None], (batch_size, 1, 1))
 
+        # 检查是否存在缓存的上一帧锚点 cached_anchor, 且其批次大小与当前请求一致.
+        # 如果满足条件, 说明是连续帧处理, 可以进行时序建模.
         if self.cached_anchor is not None and batch_size == self.cached_anchor.shape[0]:
+            # 1. 计算当前帧与缓存帧的时间差 time_interval.
+            # 2. 生成掩码mask, 标记哪些帧的时间间隔在允许范围内 (max_time_interval), 用于筛选有效历史信息.
             history_time = self.metas["timestamp"]
             time_interval = metas["timestamp"] - history_time
             time_interval = time_interval.to(dtype=instance_feature.dtype)
             self.mask = torch.abs(time_interval) <= self.max_time_interval
 
             if self.anchor_handler is not None:
+                # 如果存在 anchor_handler (负责坐标变换), 则计算从缓存帧坐标系到当前帧坐标系的变换矩阵 T_temp2cur.
+                # 通过 anchor_projection 将缓存的锚点 cached_anchor 投影到当前帧坐标系, 实现跨帧的几何对齐.
                 T_temp2cur = self.cached_anchor.new_tensor(
                     np.stack(
                         [
@@ -108,6 +120,7 @@ class InstanceBank(nn.Module):
                 and dn_metas is not None
                 and batch_size == dn_metas["dn_anchor"].shape[0]
             ):
+                # 如果提供了去噪锚点 dn_anchor, 同样对其进行坐标变换, 以保持与当前帧的空间一致性.
                 num_dn_group, num_dn = dn_metas["dn_anchor"].shape[1:3]
                 dn_anchor = self.anchor_handler.anchor_projection(
                     dn_metas["dn_anchor"].flatten(1, 2),
@@ -117,23 +130,28 @@ class InstanceBank(nn.Module):
                 dn_metas["dn_anchor"] = dn_anchor.reshape(
                     batch_size, num_dn_group, num_dn, -1
                 )
+
+            # 对时间间隔进行后处理:
+            # 如果 time_interval 不为0且在有效掩码内, 则保留原值.
+            # 否则, 设为默认值 default_time_interval (如0.5), 避免无效值干扰.
             time_interval = torch.where(
                 torch.logical_and(time_interval != 0, self.mask),
                 time_interval,
                 time_interval.new_tensor(self.default_time_interval),
             )
         else:
+            # 如果没有缓存或批次不匹配, 则重置实例库状态, 并将所有时间间隔设为默认值.
             self.reset()
             time_interval = instance_feature.new_tensor(
                 [self.default_time_interval] * batch_size
             )
 
         return (
-            instance_feature,
-            anchor,
-            self.cached_feature,
-            self.cached_anchor,
-            time_interval,
+            instance_feature,  # 当前实例特征 [B, N, C]
+            anchor,  # 当前锚点 [B, N, D]
+            self.cached_feature,  # 缓存的特征 (可能被更新)
+            self.cached_anchor,  # 缓存的锚点 (已坐标对齐)
+            time_interval,  # 时间间隔 [B]
         )
 
     def update(self, instance_feature, anchor, confidence):
