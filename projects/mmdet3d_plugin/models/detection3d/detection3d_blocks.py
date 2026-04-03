@@ -124,7 +124,10 @@ class SparseBox3DRefinementModule(BaseModule):
         time_interval: torch.Tensor = 1.0,
         return_cls=True,
     ):
+        # 1. Positional encoding
         feature = instance_feature + anchor_embed
+
+        # 2. 回归预测 (残差形式)
         output = self.layers(feature)
         output[..., self.refine_state] = (
             output[..., self.refine_state] + anchor[..., self.refine_state]
@@ -140,11 +143,14 @@ class SparseBox3DRefinementModule(BaseModule):
             velocity = torch.transpose(translation / time_interval, 0, -1)
             output[..., VX:] = velocity + anchor[..., VX:]
 
+        # 3. 分类预测
         if return_cls:
             assert self.with_cls_branch, "Without classification layers !!!"
             cls = self.cls_layers(instance_feature)
         else:
             cls = None
+
+        # 4. 质量估计
         if return_cls and self.with_quality_estimation:
             quality = self.quality_layers(feature)
         else:

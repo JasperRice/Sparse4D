@@ -155,32 +155,70 @@ class Sparse4DHead(BaseModule):
         feature_maps: Union[torch.Tensor, List],
         metas: dict,
     ):
+        """
+        forward 是 Sparse4DHead 的核心前向传播方法, 实现了 Sparse4D 检测器的完整推理流程:
+
+        1. 输入处理: 多尺度特征图, 元数据
+        2. 实例初始化: 从 InstanceBank 获取可学习 anchor 和时序缓存
+        3. 去噪训练准备: 生成 DN anchors (仅训练模式)
+        4. Decoder 层迭代: 多层特征聚合 (Temporal Cross-attention, DFA) 和 anchor 精细化
+        5. 输出收集与缓存: 整理输出并缓存当前帧信息
+
+        输入:
+            feature_maps (List[Tensor]):
+                - 形状: [bs, num_cams, C, H, W]
+                - 说明: 多尺度相机特征图
+            metas (dict):
+                - 说明: 包含图像元信息 (投影矩阵, 时间戳等) 和标注信息的字典
+
+        输出:
+            dict: 包含所有预测结果的字典
+                - classification
+                    - 形状: List[[bs, num_anchor, num_cls]]
+                    - 说明: 各层分类预测
+                - prediction
+                    - 形状: List[[bs, num_anchor, 11]]
+                    - 说明: 各层 anchor 预测
+                - quality
+                    - 形状: List[[bs, num_anchor, 2]]
+                    - 说明: 各层质量估计 (可选)
+                - instance_feature
+                    - 形状: [bs, num_anchor, embed_dims]
+                    - 说明: 最终实例特征
+                - dn_*
+                    - 说明: 各种 DN 相关输出 (仅训练时)
+        """
+        # ! 阶段 1: 输入数据预处理
+        # 1. 统一特征图格式为列表
+        # 2. 获取 batch size
         if isinstance(feature_maps, torch.Tensor):
             feature_maps = [feature_maps]
         batch_size = feature_maps[0].shape[0]
 
-        # ========= get instance info ============
+        # ! 阶段 2: 获取实例信息
+        # 检查缓存的 DN metas 是否有效
         if (
             self.sampler.dn_metas is not None
             and self.sampler.dn_metas["dn_anchor"].shape[0] != batch_size
         ):
             self.sampler.dn_metas = None
+        # 从 InstanceBank 获取实例信息
         (
-            instance_feature,
-            anchor,
-            temp_instance_feature,
-            temp_anchor,
-            time_interval,
+            instance_feature,  # 当前帧的可学习实例特征, 初始化后每帧共享, [bs, num_anchor, embed_dims]
+            anchor,  # 当前帧的 anchor 参数, [bs, num_anchor, 11]
+            temp_instance_feature,  # 时序缓存的实例特征, [bs, num_anchor, embed_dims] 或 None
+            temp_anchor,  # 时序缓存的 anchor (已运动补偿到当前帧), [bs, num_anchor, 11] 或 None
+            time_interval,  # 当前帧与历史帧的时间间隔
         ) = self.instance_bank.get(batch_size, metas, dn_metas=self.sampler.dn_metas)
 
-        # ========= prepare for denosing training ============
-        # 1. get dn metas: noisy-anchors and corresponding GT
-        # 2. concat learnable instances and noisy instances
-        # 3. get attention mask
+        # ! 阶段 3: 去噪训练准备
+        # 3.1 初始化变量
         attn_mask = None
         dn_metas = None
         temp_dn_reg_target = None
+        # 3.2 生成 DN anchors
         if self.training and hasattr(self.sampler, "get_dn_anchors"):
+            # 获取 GT instance IDs
             if "instance_id" in metas["img_metas"][0]:
                 gt_instance_id = [
                     torch.from_numpy(x["instance_id"]).cuda()
@@ -188,6 +226,7 @@ class Sparse4DHead(BaseModule):
                 ]
             else:
                 gt_instance_id = None
+            # 生成 DN anchors, 详见 projects\mmdet3d_plugin\models\detection3d\target.py
             dn_metas = self.sampler.get_dn_anchors(
                 metas[self.gt_cls_key],
                 metas[self.gt_reg_key],
@@ -202,6 +241,18 @@ class Sparse4DHead(BaseModule):
                 valid_mask,
                 dn_id_target,
             ) = dn_metas
+            # 计算 DN 的回归权重, 详见 projects\mmdet3d_plugin\models\detection3d\sampler.py
+            if hasattr(self.sampler, "get_dn_reg_weights"):
+                dn_reg_weights = self.sampler.get_dn_reg_weights(
+                    dn_reg_target,
+                    dn_cls_target,
+                    dn_id_target,
+                    gt_instance_id,
+                    metas,
+                )
+            else:
+                dn_reg_weights = torch.ones()
+            # 3.3 维度对齐, 确保 DN anchor 和可学习 anchor 的维度一致 (某些情况下 DN 可能缺少速度维度)
             num_dn_anchor = dn_anchor.shape[1]
             if dn_anchor.shape[-1] != anchor.shape[-1]:
                 remain_state_dims = anchor.shape[-1] - dn_anchor.shape[-1]
@@ -229,31 +280,63 @@ class Sparse4DHead(BaseModule):
             attn_mask = anchor.new_ones((num_instance, num_instance), dtype=torch.bool)
             attn_mask[:num_free_instance, :num_free_instance] = False
             attn_mask[num_free_instance:, num_free_instance:] = dn_attn_mask
+            # ! Attenion Mask 结构
+            #               free_anchors    DN_anchors
+            # free_anchors      1               0
+            #   DN_anchors      0          dn_attn_mask
+            # 0: 不可见
+            # 1: 可见
+            # - free_anchors 只看自己
+            # - DN 按 dn_attn_mask 规则
 
+        # ! 阶段 4: Anchor 编码
+        # ! Anchor Encoder 的作用
+        # - 将 anchor 的几何信息注入到特征空间
+        # - 类似于 Transformer 中的 positional encoding
+        # - 使模型能够感知每个实例的空间位置和形状
+        # 编码 anchor 特征
         anchor_embed = self.anchor_encoder(anchor)
+        instance_feature += anchor_embed
         if temp_anchor is not None:
             temp_anchor_embed = self.anchor_encoder(temp_anchor)
         else:
             temp_anchor_embed = None
 
-        # =================== forward the layers ====================
+        # ! 阶段 5: Decoder Layer 循环
+        # 这是 forward 方法最核心的部分, 通过多层迭代逐步优化 anchor
+        # 5.1 初始化输出收集器
         prediction = []
         classification = []
         quality = []
+        # ! 5.2 Operation Order
+        # 默认的 operation_order (第一个 decoder 省略 gnn 和 norm):
+        # 第 1 个 decoder, 可以得到更好的初始 instance_feature:
+        # ["deformable", "norm", "ffn", "norm", "refine"]
+        # 第 2 ~ num_decoder 个 decoder:
+        # ["temp_gnn", "gnn", "norm", "deformable", "norm", "ffn", "norm", "refine"]
         for i, op in enumerate(self.operation_order):
+            # ! 5.3 各操作详解
             if self.layers[i] is None:
                 continue
             elif op == "temp_gnn":
+                # ! 时序 Cross-attention
+                # 输出融合时序信息的 instance features
                 instance_feature = self.graph_model(
                     i,
-                    instance_feature,
-                    temp_instance_feature,
-                    temp_instance_feature,
+                    instance_feature,  # ? 是否只处理 free instances
+                    temp_instance_feature,  # 历史帧特征
+                    temp_instance_feature,  # key = value
                     query_pos=anchor_embed,
                     key_pos=temp_anchor_embed,
                     attn_mask=attn_mask if temp_instance_feature is None else None,
                 )
             elif op == "gnn":
+                # ! Self-attention
+                # 实例之间的 self-attention, 学习实例间的空间关系
+                # Attention mask 的作用:
+                # 1. 自由 anchor 可以互相 attend
+                # 2. DN anchor 只能在同一组内互相 attend
+                # 3. 自由 anchor 和 DN anchor 之间隔离
                 instance_feature = self.graph_model(
                     i,
                     instance_feature,
@@ -261,9 +344,22 @@ class Sparse4DHead(BaseModule):
                     query_pos=anchor_embed,
                     attn_mask=attn_mask,
                 )
-            elif op == "norm" or op == "ffn":
+            elif op == "norm":
+                # ! LayerNorm 归一化层
+                instance_feature = self.layers[i](instance_feature)
+            elif op == "ffn":
+                # ! Feed-forward network
+                # 通常是 MLP + 残差连接
                 instance_feature = self.layers[i](instance_feature)
             elif op == "deformable":
+                # ! Deformable 可变形特征聚合
+                # 这是 Sparse4D 的核心操作, 详见 DeformableFeatureAggregation
+                # 简要流程:
+                # 1. 生成关键点 (基于 anchor 的 3D box)
+                # 2. 计算采样权重 (基于 instance_feature 和 anchor_embed)
+                # 3. 将 3D 关键点投影到 2D 图像
+                # 4. 多视角多尺度特征采样
+                # 5. 加权融合得到最终特征
                 instance_feature = self.layers[i](
                     instance_feature,
                     anchor,
@@ -272,6 +368,9 @@ class Sparse4DHead(BaseModule):
                     metas,
                 )
             elif op == "refine":
+                # ! Anchor 精细化
+                # 详见 SparseBox3DRefinementModule 模块
+                # 每组 Layers 输出一组结果
                 anchor, cls, qt = self.layers[i](
                     instance_feature,
                     anchor,
@@ -286,10 +385,18 @@ class Sparse4DHead(BaseModule):
                 prediction.append(anchor)
                 classification.append(cls)
                 quality.append(qt)
+
+                # ! 5.4 时序更新
                 if len(prediction) == self.num_single_frame_decoder:
+                    # ! Instance Bank 更新
+                    # 1. 计算每个 anchor 的置信度
+                    # 2. 使用 topk 选择置信度最高的 N 个实例
+                    # 3. 将 cached_feature 与选择的实例拼接
+                    # 4. 根据 mask 决定是否使用缓存
                     instance_feature, anchor = self.instance_bank.update(
                         instance_feature, anchor, cls
                     )
+                    # ! DN 更新
                     if (
                         dn_metas is not None
                         and self.sampler.num_temp_dn_groups > 0
@@ -312,6 +419,7 @@ class Sparse4DHead(BaseModule):
                             self.instance_bank.num_anchor,
                             self.instance_bank.mask,
                         )
+                # ! 重新生成 anchor_embed
                 if i != len(self.operation_order) - 1:
                     anchor_embed = self.anchor_encoder(anchor)
                 if (
@@ -326,6 +434,8 @@ class Sparse4DHead(BaseModule):
 
         output = {}
 
+        # ! 阶段 6: 输出处理
+        # ! 6.1 分离 DN 输出
         # split predictions of learnable instances and noisy instances
         if dn_metas is not None:
             dn_classification = [x[:, num_free_instance:] for x in classification]
@@ -369,6 +479,8 @@ class Sparse4DHead(BaseModule):
                 valid_mask,
                 dn_id_target,
             )
+
+        # ! 6.2 构建输出字典
         output.update(
             {
                 "classification": classification,
@@ -377,9 +489,11 @@ class Sparse4DHead(BaseModule):
             }
         )
 
+        # ! 6.3 缓存当前帧信息
         # cache current instances for temporal modeling
         self.instance_bank.cache(instance_feature, anchor, cls, metas, feature_maps)
         if not self.training:
+            # ! 生成 instance ID 用于跟踪
             instance_id = self.instance_bank.get_instance_id(
                 cls, anchor, self.decoder.score_threshold
             )
