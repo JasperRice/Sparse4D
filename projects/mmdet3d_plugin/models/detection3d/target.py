@@ -8,7 +8,7 @@ from projects.mmdet3d_plugin.core.box3d import *
 
 from ..base_target import BaseTargetWithDenoising
 
-__all__ = ["SparseBox3DTarget"]
+__all__ = ["CustomizedSparseBox3DTarget", "SparseBox3DTarget"]
 
 
 @BBOX_SAMPLERS.register_module()
@@ -420,3 +420,92 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
             valid_mask=valid_mask,
             dn_id_target=dn_id_target,
         )
+
+
+@BBOX_SAMPLERS.register_module()
+class CustomizedSparseBox3DTarget(SparseBox3DTarget):
+    def get_dn_reg_weights(
+        self,
+        dn_reg_target,
+        dn_cls_target,
+        dn_id_target,
+        gt_instance_id,
+        vel_valid_flags,
+    ):
+        """
+        get_dn_reg_weights 的核心作用是: 为每个 DN box 生成回归损失权重,
+            并用于处理速度维度的有效性问题
+
+        核心问题: 在实际场景中, GT boxes 的速度信息不总是有效的, 例如:
+        - 静止目标的速度应该为 0, 但标注可能不准确;
+        - 某些目标无法获取速度信息, 需要根据 GT 的速度有效性标志来决定是否
+          计算速度维度的损失
+
+        输入:
+            dn_reg_target:
+                - 形状: [bs, num_dn, 11]
+                - 说明: DN boxes 对应的回归目标 (x, y, z, l, w, h, sin, cos, vx, vy, vz)
+            dn_cls_target
+                - 形状: [bs, num_dn]
+                - 说明: DN boxes 的类别目标
+            dn_id_target,
+                - 形状: [bs, num_dn]
+                - 说明: DN boxes 匹配的 GT instance ID
+            gt_instance_id,
+                - 形状: List[torch.Tensor]
+                - 说明: 每个 batch 的 GT instance IDs
+            vel_valid_flags,
+                - 形状: List[torch.Tensor]
+                - 说明: 每个 batch 的 GT 速度有效性标志
+
+        输出:
+            dn_reg_weights:
+                - 形状: [bs, num_dn, 11]
+                - 说明: 每个 DN boxes 各维度的回归权重
+        """
+        # ! 阶段 1: 初始化权重为全 1
+        dn_reg_weights = torch.ones_like(dn_reg_target)
+
+        # ! 阶段 2: 类别级别的权重调整
+        # 应用场景: 不同类别的目标可能有不同的定位精度要求, 例如:
+        # 行人的尺寸变化大, 可能需要降低尺寸维度的权重
+
+        # ! 阶段 3: 速度有效性处理
+        for batch_index in range((len(gt_instance_id))):
+            # 3.2 构建 GT 的权重矩阵
+            weight = torch.ones(
+                [gt_instance_id[batch_index].shape[0], dn_reg_target.shape[-1]],
+                device=dn_reg_target.device,
+            )
+            weight[~vel_valid_flags[batch_index], -3:] = 0
+
+            # 3.3 获取 ID 用于匹配
+            # 匹配目标: 找到每个 DN box 对应的 GT, 从而继承该 GT 的速度有效性权重
+            dn_ids = dn_id_target[batch_index]  # [M], M 是该 batch 的 DN box 数量
+            gt_ids = gt_instance_id[batch_index]  # [N], N 是该 batch 的 GT 数量
+
+            # 3.4 过滤无效 DN
+            valid_dn_mask = dn_ids != -1  # 只保留匹配到真实 GT 的 DN box
+
+            # 3.5 构建 ID 匹配矩阵
+            # 矩阵含义:
+            # comparison[i,j] = True 表示第 i 个 GT 与第 j 个 DN box 匹配 (instance ID 相同)
+            comparison = gt_ids.unsqueeze(1) == dn_ids.unsqueeze(0)  # [N, M]
+            comparison = comparison & valid_dn_mask.unsqueeze(0)  # [N, M]
+
+            # 3.6 使用 cumsum 找到第一个匹配
+            # 目的: 一个 DN box 可能匹配多个 GT (因为一个 GT 可能生成多个 DN),
+            # 但每个 DN 只能继承一个 GT 的权重
+            cumsum_comp = comparison.cumsum(dim=0)
+            first_match = (cumsum_comp == 1) & comparison
+
+            # 3.7 提取匹配索引并赋值权重
+            # 赋值逻辑:
+            # 根据 GT 索引获取对应的 weight, 并将 weight 赋给匹配的 DN box
+            match_indices = first_match.nonzero(as_tuple=False)  # [K, 2], K 是匹配数量
+            if match_indices.shape[0] > 0:
+                gt_indices = match_indices[:, 0]  # 匹配的 GT 索引
+                dn_indices = match_indices[:, 1]  # 匹配的 DN 索引
+                dn_reg_weights[batch_index, dn_indices, :] *= weight[gt_indices, :]
+
+        return dn_reg_weights
