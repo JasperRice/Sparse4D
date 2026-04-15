@@ -502,15 +502,18 @@ class Sparse4DHead(BaseModule):
 
     @force_fp32(apply_to=("model_outs"))
     def loss(self, model_outs, data, feature_maps=None):
-        # ===================== prediction losses ======================
+        # ! 阶段 1: 预测损失 (Prediction Losses)
         cls_scores = model_outs["classification"]
         reg_preds = model_outs["prediction"]
         quality = model_outs["quality"]
         output = {}
+        # 遍历每个 decoder 层的输出
         for decoder_idx, (cls, reg, qt) in enumerate(
             zip(cls_scores, reg_preds, quality)
         ):
             reg = reg[..., : len(self.reg_weights)]
+            # ! SparseBox3DTarget.sample
+            # 给每个 anchor 分配 GT
             cls_target, reg_target, reg_weights = self.sampler.sample(
                 cls,
                 reg,
@@ -528,10 +531,12 @@ class Sparse4DHead(BaseModule):
                     mask, cls.max(dim=-1).values.sigmoid() > threshold
                 )
 
+            # ! 1.1 分类损失 (Focal Loss)
             cls = cls.flatten(end_dim=1)
             cls_target = cls_target.flatten(end_dim=1)
             cls_loss = self.loss_cls(cls, cls_target, avg_factor=num_pos)
 
+            # ! 1.2 回归损失 (SparseBox3DLoss)
             mask = mask.reshape(-1)
             reg_weights = reg_weights * reg.new_tensor(self.reg_weights)
             reg_target = reg_target.flatten(end_dim=1)[mask]
@@ -560,7 +565,7 @@ class Sparse4DHead(BaseModule):
         if "dn_prediction" not in model_outs:
             return output
 
-        # ===================== denoising losses ======================
+        # ! 阶段 2: 去噪损失 (Denoising Losses)
         dn_cls_scores = model_outs["dn_classification"]
         dn_reg_preds = model_outs["dn_prediction"]
 
@@ -585,12 +590,13 @@ class Sparse4DHead(BaseModule):
                     reg_weights,
                     num_dn_pos,
                 ) = self.prepare_for_dn_loss(model_outs, prefix="temp_")
-
+            # ! 2.1 DN 分类损失
             cls_loss = self.loss_cls(
                 cls.flatten(end_dim=1)[dn_valid_mask],
                 dn_cls_target,
                 avg_factor=num_dn_pos,
             )
+            # ! 2.2 DN 回归损失
             reg_loss = self.loss_reg(
                 reg.flatten(end_dim=1)[dn_valid_mask][dn_pos_mask][
                     ..., : len(self.reg_weights)
