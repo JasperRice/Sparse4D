@@ -189,8 +189,15 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         temp_timestamps=None,
     ):
         bs, num_anchor = anchor.shape[:2]
-        size = anchor[..., None, [W, L, H]].exp()
+        # ! 阶段 1: 计算尺寸
+        # 从 anchor 中提取尺寸参数并取 exp (因为存储的是 log 空间的值)
+        size = anchor[..., None, [W, L, H]].exp() # [bs, num_anchor, 1, 3]
+        # ! 阶段 2: 生成固定关键点
+        # - 中心点
+        # - 8 个角点
+        # - 6 个面中心点
         key_points = self.fix_scale * size
+        # ! 阶段 3: 使用 MLP 生成可学习关键点
         if self.num_learnable_pts > 0 and instance_feature is not None:
             learnable_scale = (
                 self.learnable_fc(instance_feature)
@@ -199,7 +206,8 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
                 - 0.5
             )
             key_points = torch.cat([key_points, learnable_scale * size], dim=-2)
-
+        # ! 阶段 4: 旋转变换
+        # 将相对于 box 的关键点旋转到自车坐标系
         rotation_mat = anchor.new_zeros([bs, num_anchor, 3, 3])
 
         rotation_mat[:, :, 0, 0] = anchor[:, :, COS_YAW]
@@ -211,6 +219,8 @@ class SparseBox3DKeyPointsGenerator(BaseModule):
         key_points = torch.matmul(
             rotation_mat[:, :, None], key_points[..., None]
         ).squeeze(-1)
+        # ! 阶段 5: 平移到自车坐标系
+        # 将关键点平移到 anchor 的中心位置
         key_points = key_points + anchor[..., None, [X, Y, Z]]
 
         if (

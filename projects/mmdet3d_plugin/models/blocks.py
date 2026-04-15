@@ -62,11 +62,13 @@ class DeformableFeatureAggregation(BaseModule):
                 f"embed_dims must be divisible by num_groups, "
                 f"but got {embed_dims} and {num_groups}"
             )
-        self.group_dims = int(embed_dims / num_groups)
-        self.embed_dims = embed_dims
-        self.num_levels = num_levels
-        self.num_groups = num_groups
-        self.num_cams = num_cams
+        self.group_dims = int(embed_dims / num_groups)  # ! 每组的维度
+        self.embed_dims = embed_dims  # ! 总特征维度
+        self.num_levels = num_levels  # ! 特征金字塔层级数
+        self.num_groups = (
+            num_groups  # ! 分组数, 类似 multi-head attention, 不同组学习不同的聚合模式
+        )
+        self.num_cams = num_cams  # ! 相机数量
         self.use_temporal_anchor_embed = use_temporal_anchor_embed
         if use_deformable_func:
             assert DAF is not None, "deformable_aggregation needs to be set up."
@@ -76,7 +78,7 @@ class DeformableFeatureAggregation(BaseModule):
         self.proj_drop = nn.Dropout(proj_drop)
         kps_generator["embed_dims"] = embed_dims
         self.kps_generator = build_from_cfg(kps_generator, PLUGIN_LAYERS)
-        self.num_pts = self.kps_generator.num_pts
+        self.num_pts = self.kps_generator.num_pts  # ! 每个 anchor 的采样多少个关键点
         if temporal_fusion_module is not None:
             if "embed_dims" not in temporal_fusion_module:
                 temporal_fusion_module["embed_dims"] = embed_dims
@@ -107,11 +109,35 @@ class DeformableFeatureAggregation(BaseModule):
         metas: dict,
         **kwargs: dict,
     ):
+        """方法概述
+
+        DeformableFeatureAggregation 是 Sparse4D 的核心特征聚合模块, 它的作用是:
+        1. 生成 3D 关键点: 基于 anchor 的 3D 边界框生成采样点
+        2. 投影到 2D: 将 3D 关键点投影到多个相机视角
+        3. 多尺度特征采样: 从不同层级特征图采样特征
+        4. 加权融合: 根据学习到的权重融合多视角, 多尺度的特征
+
+        核心思想: 类似于 Deformable DETR 的可变形注意力, 但扩展到多相机 3D 场景
+
+        Args:
+            instance_feature (torch.Tensor): [bs, num_anchor, embed_dims], 实例特征向量
+            anchor (torch.Tensor): [bs, num_anchor, 11], 3D anchor 参数
+            anchor_embed (torch.Tensor): [bs, num_anchor, embed_dims], anchor 编码特征
+            feature_maps (List[torch.Tensor]): [bs, num_anchor, C, H, W] x num_levels, 多尺度特征图
+            metas (dict): 元数据 (投影矩阵等)
+
+        Returns:
+            torch.Tensor: [bs, num_anchor, embed_dims], 聚合后的特征
+        """
+        # ! 阶段 1: 生成关键点, 详见 SparseBox3DKeyPointsGenerator.forward
         bs, num_anchor = instance_feature.shape[:2]
         key_points = self.kps_generator(anchor, instance_feature)
+        # ! 阶段 2: 计算采样权重
         weights = self._get_weights(instance_feature, anchor_embed, metas)
 
         if self.use_deformable_func:
+            # ! 分支 A: 使用自定义 CUDA 算子
+            # ! 阶段 A.1: 3D 到 2D 投影
             points_2d = (
                 self.project_points(
                     key_points,
@@ -121,6 +147,8 @@ class DeformableFeatureAggregation(BaseModule):
                 .permute(0, 2, 3, 1, 4)
                 .reshape(bs, num_anchor, self.num_pts, self.num_cams, 2)
             )
+            # ! 阶段 A.2: 特征采样与融合
+            # 4.1 特征重排
             weights = (
                 weights.permute(0, 1, 4, 2, 3, 5)
                 .contiguous()
@@ -133,18 +161,24 @@ class DeformableFeatureAggregation(BaseModule):
                     self.num_groups,
                 )
             )
+            # 4.2 调用自定义 CUDA 算子
             features = DAF(*feature_maps, points_2d, weights).reshape(
                 bs, num_anchor, self.embed_dims
             )
         else:
+            # ! 分支 B: 纯 PyTorch 实现
+            # ! 阶段 B.1: 特征采样
             features = self.feature_sampling(
                 feature_maps,
                 key_points,
                 metas["projection_mat"],
                 metas.get("image_wh"),
             )
+            # ! 阶段 B.2: 多视角融合
             features = self.multi_view_level_fusion(features, weights)
             features = features.sum(dim=2)  # fuse multi-point features
+        # ! 阶段 3: 输出投影与残差连接
+        # MLP + Dropout 得到输出
         output = self.proj_drop(self.output_proj(features))
         if self.residual_mode == "add":
             output = output + instance_feature
@@ -154,17 +188,26 @@ class DeformableFeatureAggregation(BaseModule):
 
     def _get_weights(self, instance_feature, anchor_embed, metas=None):
         bs, num_anchor = instance_feature.shape[:2]
+        # ! 阶段 1: 特征融合, 结合实例特征和 anchor 位置编码
         feature = instance_feature + anchor_embed
+        # ! 阶段 2: 相机编码
+        # 让权重考虑相机内外参, 适应不同相机视角
         if self.camera_encoder is not None:
             camera_embed = self.camera_encoder(
                 metas["projection_mat"][:, :, :3].reshape(bs, self.num_cams, -1)
             )
             feature = feature[:, :, None] + camera_embed[:, None]
-
+        # ! 阶段 3: 预测权重
+        # 权重含义:
+        # - 对于每个 anchor, 每个 group, 预测 num_cams x num_levels x num_pts 个权重
+        # - softmax 确保权重和为 1
+        # - 不同 group 可以关注不同的视角/尺度组合
         weights = (
             self.weights_fc(feature)
             .reshape(bs, num_anchor, -1, self.num_groups)
-            .softmax(dim=-2)
+            .softmax(
+                dim=-2
+            )  # ! 关键: 在 (num_cams x num_levels x num_pts) 维度做softmax
             .reshape(
                 bs,
                 num_anchor,
@@ -174,6 +217,8 @@ class DeformableFeatureAggregation(BaseModule):
                 self.num_groups,
             )
         )
+        # ! 阶段 4: 训练时的 Dropout
+        # 随机丢弃某些视角的权重, 增加鲁棒性
         if self.training and self.attn_drop > 0:
             mask = torch.rand(bs, num_anchor, self.num_cams, 1, self.num_pts, 1)
             mask = mask.to(device=weights.device, dtype=weights.dtype)
@@ -206,12 +251,20 @@ class DeformableFeatureAggregation(BaseModule):
         num_cams = feature_maps[0].shape[1]
         bs, num_anchor, num_pts = key_points.shape[:3]
 
+        # ! 1. 投影到 2D
         points_2d = DeformableFeatureAggregation.project_points(
             key_points, projection_mat, image_wh
         )
+        # ! 2. 转换到 grid sample 格式 [-1, 1]
         points_2d = points_2d * 2 - 1
+        # ! 3. Flatten 用于批量处理
         points_2d = points_2d.flatten(end_dim=1)
-
+        # ! 4. 对每个层级的特征图进行双线性插值采样
+        # grid_sample 说明:
+        # - 输入: 特征图 [N, C, H, W], 采样坐标 [N, H_out, W_out, 2]
+        # - 输出: 采样特征 [N, C, H_out, W_out]
+        # - 坐标范围: [-1, 1] (-1 对应左/上边缘, 1 对应右/下边缘)
+        # - 支持双线性插值
         features = []
         for fm in feature_maps:
             features.append(
@@ -232,10 +285,18 @@ class DeformableFeatureAggregation(BaseModule):
         weights: torch.Tensor,
     ):
         bs, num_anchor = weights.shape[:2]
+
+        # ! 1. 将特征按 group 分割
+        # [bs, num_anchor, num_cams, num_levels, num_pts, num_groups, group_dims]
         features = weights[..., None] * features.reshape(
             features.shape[:-1] + (self.num_groups, self.group_dims)
         )
+
+        # ! 2. 沿 cams 和 levels 维度求和
+        # [bs, num_anchor, num_pts, num_groups, group_dims]
         features = features.sum(dim=2).sum(dim=2)
+
+        # ! 3. Reshape 到最终形状
         features = features.reshape(bs, num_anchor, self.num_pts, self.embed_dims)
         return features
 
