@@ -611,21 +611,58 @@ class Sparse4DHead(BaseModule):
         return output
 
     def prepare_for_dn_loss(self, model_outs, prefix=""):
+        """prepare_for_dn_loss 是 Sparse4DHead 中用于准备去噪(Denoising)训练损失计算的辅助函数。
+        它的主要作用是从模型输出中提取和预处理 DN 相关的目标数据, 为后续的损失计算做准备。
+
+        Args:
+            model_outs (dict): 模型前向传播的输出字典, 包含分类预测、回归预测、DN相关元数据等
+            prefix (str, optional): 前缀字符串, 用于区分普通DN和时序DN数据. Defaults to "".
+
+        Returns:
+            dict: 返回一个包含6个元素的元组:
+            - dn_valid_mask: DN有效掩码, 标识哪些DN样本是有效的 (非padding)
+            - dn_cls_target: DN分类目标, 经过过滤后的类别标签
+            - dn_reg_target: DN回归目标, 经过过滤和维度裁剪后的边界框目标
+            - dn_pos_mask: 正样本掩码, 标识哪些是正样本 (类别 >= 0)
+            - reg_weights: 回归权重, 根据配置为不同维度分配不同权重
+            - num_dn_pos: 正样本数量 (经过多GPU同步后的值)
+        """
+        # ! 步骤1: 获取DN有效掩码并展平
+        # dn_valid_mask: [bs, num_dn] -> [bs*num_dn]
+        # 作用: 标识哪些DN样本是真实有效的（非padding填充的）
         dn_valid_mask = model_outs[f"{prefix}dn_valid_mask"].flatten(end_dim=1)
+        # ! 步骤2: 提取有效DN样本的分类目标
+        # 先获取所有DN的分类目标，然后只保留有效样本
+        # 结果: [num_valid_dn]
         dn_cls_target = model_outs[f"{prefix}dn_cls_target"].flatten(end_dim=1)[
             dn_valid_mask
         ]
+        # ! 步骤3: 提取有效DN样本的回归目标并裁剪维度
+        # 1) 获取所有DN的回归目标
+        # 2) 只保留有效样本
+        # 3) 只保留前len(self.reg_weights)个维度（某些维度如速度可能不需要回归）
+        # 结果: [num_valid_dn, reg_dim]
         dn_reg_target = model_outs[f"{prefix}dn_reg_target"].flatten(end_dim=1)[
             dn_valid_mask
         ][..., : len(self.reg_weights)]
+        # ! 步骤4: 生成正样本掩码
+        # dn_cls_target >= 0 表示正样本（背景类通常为-1，忽略类为-2，padding为-3）
+        # 结果: [num_valid_dn]
         dn_pos_mask = dn_cls_target >= 0
+        # ! 步骤5: 只保留正样本的回归目标
+        # 结果: [num_pos_dn, reg_dim]
         dn_reg_target = dn_reg_target[dn_pos_mask]
+        # ! 步骤6: 生成回归权重
+        # 为每个正样本分配相同的权重向量（来自config的reg_weights配置）
+        # 结果: [num_pos_dn, reg_dim]
         reg_weights = dn_reg_target.new_tensor(self.reg_weights)[None].tile(
             dn_reg_target.shape[0], 1
         )
+        # ! 步骤7: 计算正样本数量（多GPU同步）
+        # reduce_mean: 对所有GPU的正样本数量取平均，确保损失计算的稳定性
         num_dn_pos = max(
             reduce_mean(torch.sum(dn_valid_mask).to(dtype=reg_weights.dtype)),
-            1.0,
+            1.0,  # 至少为1，避免除以0
         )
         return (
             dn_valid_mask,
