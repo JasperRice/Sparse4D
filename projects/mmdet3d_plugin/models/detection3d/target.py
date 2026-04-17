@@ -62,17 +62,73 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
 
     def sample(
         self,
-        cls_pred,
-        box_pred,
-        cls_target,
-        box_target,
+        cls_pred,  # 类别预测 [batch_size, num_predictions, num_classes]
+        box_pred,  # 3D框预测 [batch_size, num_predictions, 11]
+        cls_target,  # 类别目标 (list of tensors)
+        box_target,  # 3D框目标 (list of tensors)
     ):
+        """基于代价的匈牙利匹配器, 用于将模型的预测结果与真实标注进行最优匹配.
+        这是稀疏3D目标检测的关键步骤, 决定了哪些预测应该负责监督哪些真实目标.
+
+        核心工作流程:
+        ------------
+        1. 分类代价计算 (_cls_cost):
+           - 使用Focal Loss变体计算分类代价
+           - 公式: cost = (pos_cost - neg_cost) * cls_weight
+           - 使用alpha和gamma参数控制难易样本的权重
+
+        2. 回归目标编码 (encode_reg_target):
+           - 位置(X, Y, Z): 保持不变
+           - 尺寸(W, L, H): 取对数log()
+           - 朝向角: 分解为sin(yaw)和cos(yaw) (避免周期性不连续）
+           - 速度(VX, VY, VZ): 保持不变
+
+        3. 实例级回归权重计算:
+           - 标记非NaN的维度 (有效维度)
+           - 支持类别相关的回归权重
+
+        4. 回归代价计算 (_box_cost):
+           - 计算预测框与目标框之间的L1距离并加权
+           - cost = sum(|pred - target| * instance_weights * reg_weights) * box_weight
+
+        5. 匈牙利算法匹配:
+           - 合并分类和回归代价
+           - 使用scipy.optimize.linear_sum_assignment求解最优二分图匹配
+           - 处理无效值 (-inf或NaN替换为1e8)
+
+        6. 构建输出目标:
+           - output_cls_target: 匹配成功的设为目标类别, 未匹配的设为num_cls (背景)
+           - output_box_target: 匹配成功的设为目标框, 未匹配的设为0
+           - output_reg_weights: 匹配成功的设对应权重, 未匹配的设为0
+
+        关键设计特点:
+        -----------
+        - 稀疏性: 只有匹配成功的预测才计算回归损失
+        - 端到端匹配: 同时考虑分类和回归代价, 避免传统NMS后处理
+        - 灵活的权重机制: 支持类别相关的回归权重
+        - 数值稳定性: 处理NaN和无穷值
+        - 朝向角参数化: 使用sin/cos表示朝向, 避免角度周期性
+
+        返回值:
+        -------
+        output_cls_target: torch.Tensor, 形状 [bs, num_pred]
+            每个预测的类别目标, 未匹配的设为num_cls (背景类索引)
+        output_box_target: torch.Tensor, 形状 [bs, num_pred, 11]
+            每个预测的3D框目标 (编码后格式)
+        output_reg_weights: torch.Tensor, 形状 [bs, num_pred, 11]
+            每个预测的回归损失权重
+        """
         bs, num_pred, num_cls = cls_pred.shape
 
+        # ! 步骤1: 计算分类代价 (使用Focal Loss变体)
         cls_cost = self._cls_cost(cls_pred, cls_target)
 
+        # ! 步骤2: 编码回归目标 (位置不变, 尺寸取log, 朝向角分解为sin/cos)
         box_target = self.encode_reg_target(box_target, box_pred.device)
 
+        # ! 步骤3: 计算每个实例的回归权重
+        # - 首先标记非NaN的维度 (有效维度）
+        # - 如果设置了类别相关权重, 则根据不同类别调整权重
         instance_reg_weights = []
         for i in range(len(box_target)):
             weights = torch.logical_not(box_target[i].isnan()).to(
@@ -86,13 +142,19 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
                         weights,
                     )
             instance_reg_weights.append(weights)
+
+        # ! 步骤4: 计算回归代价 (加权L1距离)
         box_cost = self._box_cost(box_pred, box_target, instance_reg_weights)
 
+        # ! 步骤5: 使用匈牙利算法进行最优匹配
         indices = []
         for i in range(bs):
             if cls_cost[i] is not None and box_cost[i] is not None:
+                # 合并分类和回归代价
                 cost = (cls_cost[i] + box_cost[i]).detach().cpu().numpy()
+                # 处理无效值：将-inf和NaN替换为1e8
                 cost = np.where(np.isneginf(cost) | np.isnan(cost), 1e8, cost)
+                # 求解最优二分图匹配
                 assign = linear_sum_assignment(cost)
                 indices.append(
                     [cls_pred.new_tensor(x, dtype=torch.int64) for x in assign]
@@ -100,17 +162,24 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
             else:
                 indices.append([None, None])
 
+        # ! 步骤6: 构建输出目标
+        # 初始化：所有预测设为背景类
         output_cls_target = (
             cls_target[0].new_ones([bs, num_pred], dtype=torch.long) * num_cls
         )
+        # 初始化：所有预测框设为0
         output_box_target = box_pred.new_zeros(box_pred.shape)
+        # 初始化：所有回归权重设为0
         output_reg_weights = box_pred.new_zeros(box_pred.shape)
+
+        # 将匹配成功的预测设置为目标值
         for i, (pred_idx, target_idx) in enumerate(indices):
             if len(cls_target[i]) == 0:
                 continue
             output_cls_target[i, pred_idx] = cls_target[i][target_idx]
             output_box_target[i, pred_idx] = box_target[i][target_idx]
             output_reg_weights[i, pred_idx] = instance_reg_weights[i][target_idx]
+
         return output_cls_target, output_box_target, output_reg_weights
 
     def _cls_cost(self, cls_pred, cls_target):
