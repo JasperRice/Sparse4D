@@ -225,20 +225,61 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
         return cost
 
     def get_dn_anchors(self, cls_target, box_target, gt_instance_id=None):
+        """方法概述
+        get_dn_anchors 是 Sparse4D 中去噪训练的核心方法。它的作用是：
+
+        1. 基于 GT boxes 生成加噪声的 anchor (称为 DN anchors)
+        2. 通过匈牙利匹配建立 DN anchors 与 GT 的对应关系
+        3. 生成用于去噪训练的各种 target 和 mask
+
+        去噪训练的目的: 加速训练收敛, 提高模型稳定性. 通过让模型学习恢复被噪声干扰的 GT boxes,
+        增强模型的定位能力.
+
+        关键参数说明:
+        1. num_dn_groups (int): 去噪组数, 每组包含相同的 GT 加不同噪声
+        2. dn_noise_scale (float/list): 噪声缩放因子, 控制噪声强度
+        3. max_dn_gt (int): 每帧最多使用的 GT 数量
+        4. add_neg_dn (bool): 是否添加负样本 DN (噪声更大的 DN)
+        5. num_temp_dn_groups (int): 时序去噪组数, 用于跨帧 DN
+        """
         if self.num_dn_groups <= 0:
             return None
         if self.num_temp_dn_groups <= 0:
             gt_instance_id = None
 
+        # ! 阶段 1: GT 数量限制
+        # 目的: 限制每帧参与 DN 训练的 GT 数量, 防止 GT 过多导致计算开销过大
+        #
+        # 操作:
+        # 1. 随机打乱 GT 索引
+        # 2. 取前 max_dn_gt 个 GT
+        # 3. 同步采样 cls_target, box_target 和 gt_instance_id
         if self.max_dn_gt > 0:
             cls_target = [x[: self.max_dn_gt] for x in cls_target]
             box_target = [x[: self.max_dn_gt] for x in box_target]
             if gt_instance_id is not None:
                 gt_instance_id = [x[: self.max_dn_gt] for x in gt_instance_id]
 
+        # ! 阶段 2: 空帧处理
+        # 某些帧完全没有 GT (如纯背景帧)
         max_dn_gt = max([len(x) for x in cls_target])
         if max_dn_gt == 0:
             return None
+
+        # ! 阶段 3: GT Padding 与编码
+        # 目的: 统一 batch 内所有帧的 GT 数量
+        #
+        # encode_reg_target 编码过程:
+        # 原始 GT: [x, y, z, w, l, h, yaw, vx, vy, vz]
+        # 编码后: [x, y, z, log(w), log(l), log(h), sin(yaw), cos(yaw), vx, vy, vz]
+        #
+        # 关键变换:
+        # 1. 尺寸取 log, 约束最小值 0.05
+        # 2. yaw 角度转换为 sin/cos 双通道表示
+        #
+        # Padding 处理:
+        # 1. 不同帧 GT 数量不同时, padding 到 max_dn_gt
+        # 2. padding 位置的 cls_target = -1, box_target = 0
         cls_target = torch.stack(
             [F.pad(x, (0, max_dn_gt - x.shape[0]), value=-1) for x in cls_target]
         )
@@ -257,6 +298,13 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
                 ]
             )
 
+        # ! 阶段 4: 复制多组 GT
+        # 目的: 创建多组独立的去噪任务
+        #
+        # 效果:
+        # 1. 原来: [bs, num_gt]
+        # 2. 现在: [bs * num_dn_groups, num_gt]
+        # 3. 每组使用不同的随机噪声, 增加训练多样性
         bs, num_gt, state_dims = box_target.shape
         if self.num_dn_groups > 1:
             cls_target = cls_target.tile(self.num_dn_groups, 1)
@@ -264,22 +312,37 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
             if gt_instance_id is not None:
                 gt_instance_id = gt_instance_id.tile(self.num_dn_groups, 1)
 
-        noise = torch.rand_like(box_target) * 2 - 1
-        noise *= box_target.new_tensor(self.dn_noise_scale)
+        # ! 阶段 5: 加噪声生成 DN Anchors
+        # 正样本 DN: 噪声较小
+        noise = torch.rand_like(box_target) * 2 - 1  # [-1, 1]
+        noise *= box_target.new_tensor(
+            self.dn_noise_scale
+        )  # [-scale, scale], 模拟轻微偏移, 训练精细化能力
         dn_anchor = box_target + noise
+        # 负样本 DN: 噪声较大
         if self.add_neg_dn:
-            noise_neg = torch.rand_like(box_target) + 1
+            noise_neg = torch.rand_like(box_target) + 1  # [1, 2]
             flag = torch.where(
                 torch.rand_like(box_target) > 0.5,
                 noise_neg.new_tensor(1),
                 noise_neg.new_tensor(-1),
             )
-            noise_neg *= flag
-            noise_neg *= box_target.new_tensor(self.dn_noise_scale)
+            noise_neg *= flag  # [-2, -1], [1, 2], 模拟较大偏移, 增加训练难度
+            noise_neg *= box_target.new_tensor(
+                self.dn_noise_scale
+            )  # [-2*scale, -scale], [scale, 2*scale]
             dn_anchor = torch.cat([dn_anchor, box_target + noise_neg], dim=1)
             num_gt *= 2
 
+        # ! 阶段 6: 匈牙利匹配
+        # 关键问题: 为什么 DN anchor 需要匈牙利匹配?
+        # 1. 加噪声后, DN anchor 的顺序被打乱
+        # 2. 每个 DN anchor 需要知道它对应的原始 GT
+        # 3. 通过最小化 L1 cost 找到最佳匹配
+
+        # 计算所有 DN anchor 与所有 GT 的 box cost
         box_cost = self._box_cost(dn_anchor, box_target, torch.ones_like(box_target))
+        # 初始化 target
         dn_box_target = torch.zeros_like(dn_anchor)
         dn_cls_target = -torch.ones_like(cls_target) * 3
         if gt_instance_id is not None:
@@ -289,6 +352,7 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
             if gt_instance_id is not None:
                 dn_id_target = torch.cat([dn_id_target, dn_id_target], dim=1)
 
+        # 对每个 batch 进行匈牙利匹配
         for i in range(dn_anchor.shape[0]):
             cost = box_cost[i].cpu().numpy()
             anchor_idx, gt_idx = linear_sum_assignment(cost)
@@ -298,6 +362,17 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
             dn_cls_target[i, anchor_idx] = cls_target[i, gt_idx]
             if gt_instance_id is not None:
                 dn_id_target[i, anchor_idx] = gt_instance_id[i, gt_idx]
+
+        # ! 阶段 7: 重组数据结构
+        # 目的: 将 batch 和 groups 的维度重组
+        #
+        # 变换过程:
+        # 原始: [bs * num_dn_groups, num_gt, state_dims]
+        # reshape: [num_dn_groups, bs, num_gt, state_dims]
+        # permute: [bs, num_dn_groups, num_gt, state_dims]
+        # flatten: [bs, num_dn_groups * num_gt, state_dims]
+        #
+        # 最终结构: 每个 batch 内包含所有 groups 的 DN anchors 拼接
         dn_anchor = (
             dn_anchor.reshape(self.num_dn_groups, bs, num_gt, state_dims)
             .permute(1, 0, 2, 3)
@@ -321,6 +396,16 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
             )
         else:
             dn_id_target = None
+
+        # ! 阶段 8: Valid Mask 生成
+        # Valid Mask 含义:
+        # 标记哪些 DN anchor 是有效的 (非 padding)
+        # 用于 loss 计算时过滤无效样本
+        #
+        # 三种状态:
+        # dn_cls_target >= 0: 正样本 DN, 匹配到真实 GT; valid_mask = True
+        # dn_cls_target == -3: 负样本 DN 或未匹配; valid_mask = (cls_target >= 0)
+        # dn_cls_target == -1: Padding 位置; valid_mask = False
         valid_mask = dn_cls_target >= 0
         if self.add_neg_dn:
             cls_target = (
@@ -332,6 +417,20 @@ class SparseBox3DTarget(BaseTargetWithDenoising):
             valid_mask = torch.logical_or(
                 valid_mask, ((cls_target >= 0) & (dn_cls_target == -3))
             )  # valid denotes the items is not from pad.
+
+        # ! 阶段 9: Attention Mask 生成
+        # 目的: 控制不同 DN group 之间的信息隔离
+        # Attention Mask 结构 (以 3 groups, 每组 5 DN 为例):
+        # DN inices: [0-4] group0, [5-9] group1, [10-14] group2
+        # attn_mask (15x15)
+        #           0-4     5-9     10-14
+        # 0-4       1       0       0       group0 内可互相 attend
+        # 5-9       0       1       0       group1 内可互相 attend
+        # 10-14     0       0       1       group2 内可互相 attend
+        #
+        # 核心思想:
+        # 1. 同一组内的 DN 可以互相交互 (学习组内关系)
+        # 2. 不同组之间不能交互 (避免信息泄露)
         attn_mask = dn_box_target.new_ones(
             num_gt * self.num_dn_groups, num_gt * self.num_dn_groups
         )
