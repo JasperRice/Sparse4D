@@ -257,14 +257,76 @@ class InstanceBank(nn.Module):
         metas=None,
         feature_maps=None,
     ):
+        """
+        缓存当前帧的实例信息, 用于下一帧的时序建模.
+
+        该方法在 Sparse4DHead 的 forward 过程末尾被调用 (第494行), 用于将当前帧的高置信度
+        实例缓存起来, 供下一帧使用. 这是 Sparse4D 实现跨帧时序信息传递的核心机制.
+
+        主要功能包括:
+        1. 实例缓存: 选择当前帧中置信度最高的实例进行缓存
+        2. 置信度衰减: 对历史置信度进行衰减, 避免旧信息过度影响
+        3. 元数据保存: 保存当前帧的元数据, 用于计算时间间隔和坐标变换
+        4. 临时置信度管理: 维护 temp_confidence 用于实例ID跟踪
+
+        Args:
+            instance_feature (torch.Tensor): 当前帧的实例特征, 形状为 [B, N, C]
+                - B: batch size
+                - N: 实例总数
+                - C: 特征维度 (embed_dims)
+            anchor (torch.Tensor): 当前帧的锚点参数, 形状为 [B, N, D]
+                - D: 锚点维度 (通常为11, 包含位置、尺寸、旋转、速度等)
+            confidence (torch.Tensor): 实例的分类置信度, 形状为 [B, N, num_classes]
+                - 来自 decoder 层的分类预测结果
+            metas (dict, optional): 当前帧的元数据字典, 包含以下关键字段:
+                - timestamp: 当前帧的时间戳
+                - img_metas: 图像元信息列表, 包含 T_global 和 T_global_inv 等变换矩阵
+                - 其他相机内参、外参等信息
+            feature_maps (list, optional): 多尺度特征图 (当前未使用, 保留用于扩展)
+
+        Returns:
+            None: 该方法直接修改实例库的内部状态, 不返回任何值
+
+        Note:
+            - 该方法是 Sparse4D 时序建模的"写入"端, 与 get() 方法的"读取"端配合使用
+            - 通过置信度驱动的实例选择, 确保缓存的是最可靠的实例信息
+            - 置信度衰减机制防止旧实例的置信度过高, 提高跟踪的鲁棒性
+            - 梯度分离避免了跨帧梯度传播, 使训练更加稳定
+            - 缓存的实例数量 (num_temp_instances) 是一个重要的超参数, 需要权衡效果和速度
+        """
+        # ! 1. 检查是否需要缓存:
+        # - 如果 self.num_temp_instances <= 0, 表示不启用时序建模, 直接返回
+        # - 这是通过配置文件控制的, 例如 num_temp_instances=600 表示缓存600个实例
         if self.num_temp_instances <= 0:
             return
+
+        # ! 2. 梯度分离:
+        # - 对 instance_feature、anchor、confidence 进行 .detach() 操作
+        # - 原因: 缓存的信息仅用于推理, 不应参与梯度反向传播
+        # - 这可以避免跨帧的梯度传播, 减少显存占用
         instance_feature = instance_feature.detach()
         anchor = anchor.detach()
         confidence = confidence.detach()
 
+        # ! 3. 保存元数据:
+        # - 将当前帧的 metas 保存到 self.metas
+        # - 用于下一帧调用 get() 时计算时间间隔和进行坐标变换
         self.metas = metas
+
+        # ! 4. 置信度处理:
+        # - 取每个实例的最高类别置信度: confidence.max(dim=-1).values
+        # - 通过 sigmoid 将 logits 转换为概率值 (0-1范围)
+        # - sigmoid 后的值可以理解为"该实例包含目标的概率"
         confidence = confidence.max(dim=-1).values.sigmoid()
+
+        # ! 5. 置信度衰减与更新:
+        # - 如果存在历史置信度 (self.confidence is not None):
+        #     - 对历史置信度应用衰减: self.confidence * self.confidence_decay
+        #     - self.confidence_decay 默认为 0.6, 表示每帧衰减40%
+        #     - 取衰减后的历史置信度与当前置信度的最大值
+        #     - 这确保了缓存实例的置信度不会因时间推移而过高
+        # - 将更新后的置信度保存到 self.temp_confidence
+        # - temp_confidence 用于实例ID的跟踪和更新
         if self.confidence is not None:
             confidence[:, : self.num_temp_instances] = torch.maximum(
                 self.confidence * self.confidence_decay,
@@ -272,6 +334,12 @@ class InstanceBank(nn.Module):
             )
         self.temp_confidence = confidence
 
+        # ! 6. 实例选择与缓存:
+        # - 使用 topk 函数选择置信度最高的 self.num_temp_instances 个实例
+        # - 例如, 如果 num_temp_instances=600, 则从900个实例中选择600个
+        # - 将选中的实例特征保存到 self.cached_feature
+        # - 将选中的实例锚点保存到 self.cached_anchor
+        # - 将选中的实例置信度保存到 self.confidence
         (
             self.confidence,
             (self.cached_feature, self.cached_anchor),
