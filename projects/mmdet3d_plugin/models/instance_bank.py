@@ -155,6 +155,69 @@ class InstanceBank(nn.Module):
         )
 
     def update(self, instance_feature, anchor, confidence):
+        """
+        更新实例库中的缓存特征和锚点, 实现跨帧的时序信息传递和实例管理.
+
+        该方法在 Sparse4DHead 的 forward 过程中被调用, 用于在多帧处理时更新实例库的状态.
+        主要功能包括:
+        1. 时序特征融合: 将当前帧的高置信度实例与历史缓存的实例进行融合
+        2. 实例选择: 通过置信度排序选择最可靠的实例进行缓存
+        3. DN (Denoising) 实例处理: 分离并保留去噪训练相关的实例
+        4. 实例ID管理: 更新实例ID, 处理丢失的实例
+
+        Args:
+            instance_feature (torch.Tensor): 当前帧的实例特征, 形状为 [B, N, C]
+                - B: batch size
+                - N: 实例总数 (包括可学习实例和DN实例)
+                - C: 特征维度
+            anchor (torch.Tensor): 当前帧的锚点参数, 形状为 [B, N, D]
+                - D: 锚点维度 (通常为11, 包含位置、尺寸、旋转、速度等)
+            confidence (torch.Tensor): 实例的分类置信度, 形状为 [B, N, num_classes]
+                - 每个实例对每个类别的置信度分数
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: 更新后的实例特征和锚点
+                - instance_feature (torch.Tensor): 更新后的实例特征, 形状为 [B, N, C]
+                - anchor (torch.Tensor): 更新后的锚点参数, 形状为 [B, N, D]
+
+        Process:
+            1. DN实例分离:
+               - 如果实例总数超过预设的锚点数量 (self.num_anchor), 说明包含DN实例
+               - 将DN实例从主实例中分离出来, 保存到 dn_instance_feature 和 dn_anchor
+               - 主实例数量被限制为 self.num_anchor
+
+            2. 置信度计算与实例选择:
+               - 计算每个实例的最高类别置信度: confidence.max(dim=-1).values
+               - 确定需要保留的实例数量 N = self.num_anchor - self.num_temp_instances
+                 (总锚点数减去临时实例数)
+               - 使用 topk 函数选择置信度最高的 N 个实例的特征和锚点
+
+            3. 时序特征融合:
+               - 将历史缓存的特征 self.cached_feature 与当前选择的高置信度特征拼接
+               - 将历史缓存的锚点 self.cached_anchor 与当前选择的高置信度锚点拼接
+
+            4. 条件更新:
+               - 根据掩码 self.mask 决定是否使用融合后的特征和锚点
+               - 如果掩码为 True (表示有效的时间间隔), 使用融合结果
+               - 否则, 保持当前帧的特征和锚点不变
+
+            5. 实例ID管理:
+               - 如果存在实例ID (self.instance_id), 根据掩码更新ID
+               - 对于无效的实例 (掩码为False), 将其ID设置为-1 (表示丢失)
+
+            6. DN实例恢复:
+               - 如果存在DN实例 (num_dn > 0), 将其重新附加到更新后的特征和锚点末尾
+               - 确保DN实例在后续处理中不被遗忘
+
+            7. 返回结果:
+               - 返回更新后的实例特征和锚点, 用于后续的处理步骤
+
+        Note:
+            - 该方法是 Sparse4D 检测器实现时序建模的关键组件
+            - 通过置信度驱动的实例选择, 确保缓存的是最可靠的实例信息
+            - 通过掩码机制, 避免使用时间间隔过长的历史信息, 提高跟踪的鲁棒性
+            - DN实例的特殊处理保证了去噪训练的正确性
+        """
         if self.cached_feature is None:
             return instance_feature, anchor
 
