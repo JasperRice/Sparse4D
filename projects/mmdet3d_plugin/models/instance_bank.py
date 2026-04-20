@@ -346,27 +346,143 @@ class InstanceBank(nn.Module):
         ) = topk(confidence, self.num_temp_instances, instance_feature, anchor)
 
     def get_instance_id(self, confidence, anchor=None, threshold=None):
+        """
+        为当前帧的检测实例分配唯一的跟踪ID, 用于多目标跟踪.
+
+        该方法在 Sparse4DHead 的 forward 过程末尾被调用 (第497-500行, 仅在推理模式下),
+        用于为检测到的目标分配唯一的实例ID, 实现跨帧的目标关联和跟踪.
+
+        主要功能包括:
+        1. ID继承: 将历史缓存的实例ID继承到当前帧的对应位置
+        2. 新ID分配: 为新检测到的实例分配新的唯一ID
+        3. 阈值过滤: 可选地过滤低置信度的实例, 不为其分配ID
+        4. ID更新: 更新缓存的实例ID, 用于下一帧的ID继承
+
+        Args:
+            confidence (torch.Tensor): 实例的分类置信度, 形状为 [B, N, num_classes]
+                - B: batch size
+                - N: 实例总数
+                - num_classes: 类别数量
+                - 用于确定哪些实例需要分配ID以及ID的继承顺序
+            anchor (torch.Tensor, optional): 当前帧的锚点参数, 形状为 [B, N, D]
+                - 当前未使用, 保留用于扩展或兼容性
+            threshold (float, optional): 置信度阈值
+                - 如果提供, 只有置信度 >= threshold 的实例才会被分配ID
+                - 用于过滤低置信度的检测, 避免为背景或噪声分配ID
+                - 默认值 None 表示不为置信度设置阈值
+
+        Returns:
+            torch.Tensor: 实例ID张量, 形状为 [B, N], 数据类型为 torch.int64
+                - 每个元素表示对应实例的唯一跟踪ID
+                - ID >= 0: 有效的实例ID, 用于跨帧关联同一目标
+                - ID = -1: 表示该实例未被分配有效ID (可能是背景、低置信度或新检测但未达阈值)
+                - ID在整个视频序列中保持唯一性, 通过 self.prev_id 计数器实现
+
+        Note:
+            - 该方法是 Sparse4D 实现多目标跟踪的核心组件
+            - 通过全局计数器 self.prev_id 确保ID在整个视频序列中的唯一性
+            - ID继承机制使得同一目标在跨帧时保持相同的ID
+            - 阈值过滤机制可以避免为背景或低置信度检测分配ID, 提高跟踪质量
+            - update_instance_id 确保只有高置信度的实例ID被缓存, 提高跟踪的可靠性
+            - 该方法仅在推理模式下被调用 (见 sparse4d_head.py 第495-500行)
+        """
+        # ! 1. 置信度处理:
+        # - 取每个实例的最高类别置信度: confidence.max(dim=-1).values
+        # - 通过 sigmoid 将 logits 转换为概率值 (0-1范围)
+        # - sigmoid 后的值表示"该实例包含目标的概率"
         confidence = confidence.max(dim=-1).values.sigmoid()
+
+        # ! 2. 初始化ID张量:
+        # - 创建一个与 confidence 形状相同的张量 instance_id, 初始值全为 -1
+        # - -1 表示"未分配ID", 是实例ID的默认无效值
+        # - 数据类型为 torch.int64 (long), 适合用作索引和ID
         instance_id = confidence.new_full(confidence.shape, -1).long()
 
+        # ! 3. ID继承:
+        # - 检查是否存在历史缓存的实例ID (self.instance_id is not None)
+        # - 检查 batch size 是否匹配 (self.instance_id.shape[0] == instance_id.shape[0])
+        # - 如果条件满足, 将历史ID复制到当前帧的对应位置:
+        #     instance_id[:, : self.instance_id.shape[1]] = self.instance_id
+        # - 这意味着前 self.instance_id.shape[1] 个实例继承了历史ID
+        # - 这些实例通常是时序建模中缓存的高置信度实例
         if (
             self.instance_id is not None
             and self.instance_id.shape[0] == instance_id.shape[0]
         ):
             instance_id[:, : self.instance_id.shape[1]] = self.instance_id
 
+        # ! 4. 确定需要新ID的实例:
+        # - 创建掩码 mask = instance_id < 0, 标识所有尚未分配ID的实例
+        # - 如果提供了 threshold 参数, 进一步过滤:
+        #     mask = mask & (confidence >= threshold)
+        # - 这确保只有置信度足够高的新实例才会被分配ID
         mask = instance_id < 0
         if threshold is not None:
             mask = mask & (confidence >= threshold)
+
+        # ! 5. 分配新ID:
+        # - 计算需要新ID的实例数量: num_new_instance = mask.sum()
+        # - 生成新的ID序列: new_ids = torch.arange(num_new_instance) + self.prev_id
+        #     - self.prev_id 是一个全局计数器, 确保ID在整个序列中唯一
+        #     - 例如, 如果 prev_id=100, 新检测3个实例, 则ID为 [100, 101, 102]
+        # - 将新ID分配给需要ID的实例: instance_id[torch.where(mask)] = new_ids
+        # - 更新全局计数器: self.prev_id += num_new_instance
         num_new_instance = mask.sum()
         new_ids = torch.arange(num_new_instance).to(instance_id) + self.prev_id
         instance_id[torch.where(mask)] = new_ids
         self.prev_id += num_new_instance
+
+        # ! 6. 更新缓存的实例ID:
+        # - 如果启用了时序建模 (self.num_temp_instances > 0):
+        #     - 调用 update_instance_id 方法更新 self.instance_id
+        #     - 根据置信度选择高置信度实例的ID进行缓存
+        #     - 这些缓存的ID将在下一帧被继承
         if self.num_temp_instances > 0:
             self.update_instance_id(instance_id, confidence)
         return instance_id
 
     def update_instance_id(self, instance_id=None, confidence=None):
+        """
+        更新缓存的实例ID, 选择高置信度实例的ID进行保存, 用于下一帧的ID继承.
+
+        该方法是 get_instance_id 的辅助方法, 在 get_instance_id 中被调用 (第447-448行).
+        其主要作用是根据置信度从当前帧的所有实例中选择最可靠的 num_temp_instances 个实例,
+        将它们的ID保存到 self.instance_id 中, 以便在下一帧进行ID继承.
+
+        主要功能包括:
+        1. 置信度选择: 根据置信度确定哪些实例的ID应该被缓存
+        2. ID筛选: 使用 topk 选择高置信度实例的ID
+        3. ID缓存: 将筛选后的ID保存到 self.instance_id, 用于下一帧继承
+
+        Args:
+            instance_id (torch.Tensor, optional): 当前帧的实例ID张量, 形状为 [B, N]
+                - B: batch size
+                - N: 实例总数
+                - 包含当前帧所有实例的跟踪ID (>=0 表示有效ID, -1 表示无效ID)
+                - 如果为 None, 则从 self.temp_confidence 中获取置信度进行选择
+            confidence (torch.Tensor, optional): 当前帧的实例置信度, 形状为 [B, N] 或 [B, N, num_classes]
+                - 用于确定哪些实例的ID应该被缓存
+                - 如果为 None, 则使用 self.temp_confidence 作为置信度
+
+        Returns:
+            None: 该方法直接修改 self.instance_id, 不返回任何值
+
+        Note:
+            - 该方法是 Sparse4D 多目标跟踪的关键组件, 确保ID继承的可靠性
+            - 通过置信度驱动的ID选择, 确保只有高置信度实例的ID被缓存
+            - 这避免了低置信度或噪声实例的ID被继承到下一帧, 提高跟踪质量
+            - self.instance_id 的形状是 [B, num_anchor], 与实例特征和锚点的数量一致
+            - 在 get_instance_id 中, 只有前 self.instance_id.shape[1] 个实例会继承历史ID
+            - 该方法仅在启用了时序建模 (self.num_temp_instances > 0) 时才会被调用
+        """
+        # ! 1. 确定用于排序的置信度:
+        # - 如果 self.temp_confidence 存在 (在 cache 方法中被设置):
+        #     - 使用 self.temp_confidence 作为排序依据
+        #     - self.temp_confidence 是在 cache 方法中计算并保存的, 已经过 sigmoid 处理
+        # - 如果 self.temp_confidence 不存在:
+        #     - 使用传入的 confidence 参数
+        #     - 如果 confidence 是3D张量 [B, N, num_classes], 取最高类别置信度
+        #     - 如果 confidence 是2D张量 [B, N], 直接使用
         if self.temp_confidence is None:
             if confidence.dim() == 3:  # bs, num_anchor, num_cls
                 temp_conf = confidence.max(dim=-1).values
@@ -374,8 +490,25 @@ class InstanceBank(nn.Module):
                 temp_conf = confidence
         else:
             temp_conf = self.temp_confidence
+
+        # ! 2. 选择高置信度实例的ID:
+        # - 使用 topk 函数根据置信度选择最高的 self.num_temp_instances 个实例
+        # - 例如, 如果 num_temp_instances=600, 则从900个实例中选择600个
+        # - topk 返回 (confidence, [selected_instance_id, ...])
+        # - 我们只关心 selected_instance_id, 即高置信度实例的ID
         instance_id = topk(temp_conf, self.num_temp_instances, instance_id)[1][0]
+
+        # ! 3. 维度调整:
+        # - topk 返回的 instance_id 形状为 [B, num_temp_instances, 1]
+        # - 使用 squeeze(dim=-1) 将其压缩为 [B, num_temp_instances]
         instance_id = instance_id.squeeze(dim=-1)
+
+        # ! 4. 填充到完整尺寸:
+        # - 使用 F.pad 将 instance_id 从 [B, num_temp_instances] 填充到 [B, num_anchor]
+        # - 填充的值为 -1, 表示这些位置没有有效的ID
+        # - 最终 self.instance_id 的形状为 [B, num_anchor]
+        # - 前 num_temp_instances 个位置是高置信度实例的ID
+        # - 剩余位置是 -1 (无效ID)
         self.instance_id = F.pad(
             instance_id,
             (0, self.num_anchor - self.num_temp_instances),
