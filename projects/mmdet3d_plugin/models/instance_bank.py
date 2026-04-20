@@ -180,38 +180,6 @@ class InstanceBank(nn.Module):
                 - instance_feature (torch.Tensor): 更新后的实例特征, 形状为 [B, N, C]
                 - anchor (torch.Tensor): 更新后的锚点参数, 形状为 [B, N, D]
 
-        Process:
-            1. DN实例分离:
-               - 如果实例总数超过预设的锚点数量 (self.num_anchor), 说明包含DN实例
-               - 将DN实例从主实例中分离出来, 保存到 dn_instance_feature 和 dn_anchor
-               - 主实例数量被限制为 self.num_anchor
-
-            2. 置信度计算与实例选择:
-               - 计算每个实例的最高类别置信度: confidence.max(dim=-1).values
-               - 确定需要保留的实例数量 N = self.num_anchor - self.num_temp_instances
-                 (总锚点数减去临时实例数)
-               - 使用 topk 函数选择置信度最高的 N 个实例的特征和锚点
-
-            3. 时序特征融合:
-               - 将历史缓存的特征 self.cached_feature 与当前选择的高置信度特征拼接
-               - 将历史缓存的锚点 self.cached_anchor 与当前选择的高置信度锚点拼接
-
-            4. 条件更新:
-               - 根据掩码 self.mask 决定是否使用融合后的特征和锚点
-               - 如果掩码为 True (表示有效的时间间隔), 使用融合结果
-               - 否则, 保持当前帧的特征和锚点不变
-
-            5. 实例ID管理:
-               - 如果存在实例ID (self.instance_id), 根据掩码更新ID
-               - 对于无效的实例 (掩码为False), 将其ID设置为-1 (表示丢失)
-
-            6. DN实例恢复:
-               - 如果存在DN实例 (num_dn > 0), 将其重新附加到更新后的特征和锚点末尾
-               - 确保DN实例在后续处理中不被遗忘
-
-            7. 返回结果:
-               - 返回更新后的实例特征和锚点, 用于后续的处理步骤
-
         Note:
             - 该方法是 Sparse4D 检测器实现时序建模的关键组件
             - 通过置信度驱动的实例选择, 确保缓存的是最可靠的实例信息
@@ -221,6 +189,10 @@ class InstanceBank(nn.Module):
         if self.cached_feature is None:
             return instance_feature, anchor
 
+        # ! 步骤 1. DN实例分离:
+        # - 如果实例总数超过预设的锚点数量 (self.num_anchor), 说明包含DN实例
+        # - 将DN实例从主实例中分离出来, 保存到 dn_instance_feature 和 dn_anchor
+        # - 主实例数量被限制为 self.num_anchor
         num_dn = 0
         if instance_feature.shape[1] > self.num_anchor:
             num_dn = instance_feature.shape[1] - self.num_anchor
@@ -230,17 +202,35 @@ class InstanceBank(nn.Module):
             anchor = anchor[:, : self.num_anchor]
             confidence = confidence[:, : self.num_anchor]
 
+        # ! 步骤 2. 置信度计算与实例选择:
+        # - 计算每个实例的最高类别置信度: confidence.max(dim=-1).values
+        # - 确定需要保留的实例数量 N = self.num_anchor - self.num_temp_instances
+        #     (总锚点数减去临时实例数), 实际 self.num_temp_instances 为 600
+        # - 使用 topk 函数选择置信度最高的 N 个实例的特征和锚点
         N = self.num_anchor - self.num_temp_instances
         confidence = confidence.max(dim=-1).values
         _, (selected_feature, selected_anchor) = topk(
             confidence, N, instance_feature, anchor
         )
+
+        # ! 步骤 3. 时序特征融合:
+        # - 将历史缓存的特征 self.cached_feature 与当前选择的高置信度特征拼接
+        # - 将历史缓存的锚点 self.cached_anchor 与当前选择的高置信度锚点拼接
         selected_feature = torch.cat([self.cached_feature, selected_feature], dim=1)
         selected_anchor = torch.cat([self.cached_anchor, selected_anchor], dim=1)
+
+        # ! 步骤 4. 条件更新:
+        # - 根据掩码 self.mask 决定是否使用融合后的特征和锚点
+        # - 如果掩码为 True (表示有效的时间间隔), 使用融合结果
+        # - 否则, 保持当前帧的特征和锚点不变
         instance_feature = torch.where(
             self.mask[:, None, None], selected_feature, instance_feature
         )
         anchor = torch.where(self.mask[:, None, None], selected_anchor, anchor)
+
+        # ! 步骤 5. 实例ID管理:
+        # - 如果存在实例ID (self.instance_id), 根据掩码更新ID
+        # - 对于无效的实例 (掩码为False), 将其ID设置为-1 (表示丢失)
         if self.instance_id is not None:
             self.instance_id = torch.where(
                 self.mask[:, None],
@@ -248,9 +238,15 @@ class InstanceBank(nn.Module):
                 self.instance_id.new_tensor(-1),
             )
 
+        # ! 步骤 6. DN实例恢复:
+        # - 如果存在DN实例 (num_dn > 0), 将其重新附加到更新后的特征和锚点末尾
+        # - 确保DN实例在后续处理中不被遗忘
         if num_dn > 0:
             instance_feature = torch.cat([instance_feature, dn_instance_feature], dim=1)
             anchor = torch.cat([anchor, dn_anchor], dim=1)
+
+        # ! 步骤 7. 返回结果:
+        # - 返回更新后的实例特征和锚点, 用于后续的处理步骤
         return instance_feature, anchor
 
     def cache(
